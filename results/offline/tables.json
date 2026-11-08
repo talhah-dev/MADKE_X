@@ -26,6 +26,7 @@
         "concurrency": 1,
         "retry_failed": false,
         "fail_demo": 100,
+        "fail_demo_rate": 0.02,
         "mode": "offline",
         "base_url": "http://localhost:8000/v1",
         "api_key": "EMPTY",
@@ -42,7 +43,7 @@
         "seed": 0,
         "fail_rate": 0.0
     },
-    "elapsed_sec": 119.77108883857727,
+    "elapsed_sec": 259.25818133354187,
     "full": {
         "triviaqa": {
             "legacy": {
@@ -228,9 +229,9 @@
                 "avg_x_nodedup_tokens": 791.862,
                 "avg_x_tokens": 789.442,
                 "token_reduction_pct": 45.34615491124588,
-                "build_time_sec": 2.1374222000013106,
-                "build_time_ms_per_q": 4.274844400002621,
-                "peak_memory_kb": 2280.0703125,
+                "build_time_sec": 6.740054000001692,
+                "build_time_ms_per_q": 13.480108000003383,
+                "peak_memory_kb": 2281.65625,
                 "tokenizer": "regex-approximation",
                 "ordering": {
                     "source_order": {
@@ -506,9 +507,9 @@
                 "avg_x_nodedup_tokens": 807.232,
                 "avg_x_tokens": 805.374,
                 "token_reduction_pct": 44.89974357781469,
-                "build_time_sec": 1.9116465000042808,
-                "build_time_ms_per_q": 3.8232930000085616,
-                "peak_memory_kb": 2328.2568359375,
+                "build_time_sec": 6.774249800000689,
+                "build_time_ms_per_q": 13.548499600001378,
+                "peak_memory_kb": 2328.1474609375,
                 "tokenizer": "regex-approximation",
                 "ordering": {
                     "source_order": {
@@ -783,9 +784,9 @@
                 "avg_x_nodedup_tokens": 806.722,
                 "avg_x_tokens": 804.436,
                 "token_reduction_pct": 45.161488235879574,
-                "build_time_sec": 2.400258000001486,
-                "build_time_ms_per_q": 4.800516000002972,
-                "peak_memory_kb": 2309.140625,
+                "build_time_sec": 6.0342504999935045,
+                "build_time_ms_per_q": 12.068500999987009,
+                "peak_memory_kb": 2321.9453125,
                 "tokenizer": "regex-approximation",
                 "ordering": {
                     "source_order": {
@@ -1060,8 +1061,8 @@
                 "avg_x_nodedup_tokens": 805.414,
                 "avg_x_tokens": 801.504,
                 "token_reduction_pct": 45.38206469075432,
-                "build_time_sec": 2.4849634999991395,
-                "build_time_ms_per_q": 4.969926999998279,
+                "build_time_sec": 3.2882530000060797,
+                "build_time_ms_per_q": 6.576506000012159,
                 "peak_memory_kb": 2279.5830078125,
                 "tokenizer": "regex-approximation",
                 "ordering": {
@@ -1336,8 +1337,8 @@
                 "avg_x_nodedup_tokens": 804.272,
                 "avg_x_tokens": 802.66,
                 "token_reduction_pct": 45.1453205471663,
-                "build_time_sec": 2.2302430999989156,
-                "build_time_ms_per_q": 4.460486199997831,
+                "build_time_sec": 5.139429499999096,
+                "build_time_ms_per_q": 10.278858999998192,
                 "peak_memory_kb": 2322.927734375,
                 "tokenizer": "regex-approximation",
                 "ordering": null
@@ -1583,8 +1584,8 @@
                 "avg_x_nodedup_tokens": 794.375,
                 "avg_x_tokens": 793.45,
                 "token_reduction_pct": 45.19450356370418,
-                "build_time_sec": 0.6589397999996436,
-                "build_time_ms_per_q": 4.118373749997772,
+                "build_time_sec": 0.908047600001737,
+                "build_time_ms_per_q": 5.675297500010856,
                 "peak_memory_kb": 754.04296875,
                 "tokenizer": "regex-approximation",
                 "ordering": {
@@ -1859,8 +1860,8 @@
                 "avg_x_nodedup_tokens": 804.925,
                 "avg_x_tokens": 803.08125,
                 "token_reduction_pct": 44.8899239568188,
-                "build_time_sec": 0.6257877000025474,
-                "build_time_ms_per_q": 3.911173125015921,
+                "build_time_sec": 1.105976799997734,
+                "build_time_ms_per_q": 6.912354999985837,
                 "peak_memory_kb": 781.9697265625,
                 "tokenizer": "regex-approximation",
                 "ordering": {
@@ -2135,8 +2136,8 @@
                 "avg_x_nodedup_tokens": 809.00625,
                 "avg_x_tokens": 806.43125,
                 "token_reduction_pct": 45.17196835136444,
-                "build_time_sec": 0.6885096999976668,
-                "build_time_ms_per_q": 4.303185624985417,
+                "build_time_sec": 0.9772580999997444,
+                "build_time_ms_per_q": 6.107863124998403,
                 "peak_memory_kb": 785.333984375,
                 "tokenizer": "regex-approximation",
                 "ordering": {
@@ -2412,8 +2413,8 @@
                 "avg_x_nodedup_tokens": 805.44375,
                 "avg_x_tokens": 798.5875,
                 "token_reduction_pct": 45.57296325640435,
-                "build_time_sec": 0.7381036999940989,
-                "build_time_ms_per_q": 4.613148124963118,
+                "build_time_sec": 1.3063460999983363,
+                "build_time_ms_per_q": 8.164663124989602,
                 "peak_memory_kb": 787.380859375,
                 "tokenizer": "regex-approximation",
                 "ordering": {
@@ -2688,9 +2689,9 @@
                 "avg_x_nodedup_tokens": 804.9,
                 "avg_x_tokens": 802.55,
                 "token_reduction_pct": 45.11118140393773,
-                "build_time_sec": 0.8653730000005453,
-                "build_time_ms_per_q": 5.408581250003408,
-                "peak_memory_kb": 786.31640625,
+                "build_time_sec": 0.8842519999961951,
+                "build_time_ms_per_q": 5.526574999976219,
+                "peak_memory_kb": 785.55078125,
                 "tokenizer": "regex-approximation",
                 "ordering": null
             },
@@ -2757,16 +2758,18 @@
                 "n": 100,
                 "n_failed": 0,
                 "n_completed": 100,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 11.0
+                "scored_despite_failed_call": 17,
+                "exact_over_completed": 10.0,
+                "fail_rate": 0.02
             },
             "x": {
                 "system": "MADKE-X",
                 "n": 100,
-                "n_failed": 69,
-                "n_completed": 31,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 19.35483870967742
+                "n_failed": 25,
+                "n_completed": 75,
+                "scored_despite_failed_call": 0,
+                "exact_over_completed": 10.666666666666666,
+                "fail_rate": 0.02
             }
         },
         "nq": {
@@ -2775,16 +2778,18 @@
                 "n": 100,
                 "n_failed": 0,
                 "n_completed": 100,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 9.0
+                "scored_despite_failed_call": 16,
+                "exact_over_completed": 12.0,
+                "fail_rate": 0.02
             },
             "x": {
                 "system": "MADKE-X",
                 "n": 100,
-                "n_failed": 68,
-                "n_completed": 32,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 12.5
+                "n_failed": 18,
+                "n_completed": 82,
+                "scored_despite_failed_call": 0,
+                "exact_over_completed": 9.75609756097561,
+                "fail_rate": 0.02
             }
         },
         "hotpotqa": {
@@ -2793,16 +2798,18 @@
                 "n": 100,
                 "n_failed": 0,
                 "n_completed": 100,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 2.0
+                "scored_despite_failed_call": 23,
+                "exact_over_completed": 3.0,
+                "fail_rate": 0.02
             },
             "x": {
                 "system": "MADKE-X",
                 "n": 100,
-                "n_failed": 63,
-                "n_completed": 37,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 2.7027027027027026
+                "n_failed": 23,
+                "n_completed": 77,
+                "scored_despite_failed_call": 0,
+                "exact_over_completed": 2.5974025974025974,
+                "fail_rate": 0.02
             }
         },
         "wikimultihopqa": {
@@ -2811,16 +2818,18 @@
                 "n": 100,
                 "n_failed": 0,
                 "n_completed": 100,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 1.0
+                "scored_despite_failed_call": 21,
+                "exact_over_completed": 1.0,
+                "fail_rate": 0.02
             },
             "x": {
                 "system": "MADKE-X",
                 "n": 100,
-                "n_failed": 76,
-                "n_completed": 24,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 0.0
+                "n_failed": 28,
+                "n_completed": 72,
+                "scored_despite_failed_call": 0,
+                "exact_over_completed": 0.0,
+                "fail_rate": 0.02
             }
         },
         "fever": {
@@ -2829,16 +2838,18 @@
                 "n": 100,
                 "n_failed": 0,
                 "n_completed": 100,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 29.0
+                "scored_despite_failed_call": 23,
+                "exact_over_completed": 34.0,
+                "fail_rate": 0.02
             },
             "x": {
                 "system": "MADKE-X",
                 "n": 100,
-                "n_failed": 61,
-                "n_completed": 39,
-                "error_strings_scored_as_answers": 0,
-                "exact_over_completed": 38.46153846153846
+                "n_failed": 12,
+                "n_completed": 88,
+                "scored_despite_failed_call": 0,
+                "exact_over_completed": 36.36363636363637,
+                "fail_rate": 0.02
             }
         }
     }
