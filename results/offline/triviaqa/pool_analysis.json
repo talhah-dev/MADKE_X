@@ -1,0 +1,51 @@
+{
+    "n": 500,
+    "task_type": "extractive",
+    "avg_legacy_candidates": 14.54,
+    "avg_x_candidates": 9.54,
+    "duplicates_removed": 12,
+    "questions_with_duplicates": 12,
+    "avg_x_pool_size": 9.516,
+    "avg_legacy_tokens": 1444.44,
+    "avg_x_nodedup_tokens": 791.862,
+    "avg_x_tokens": 789.442,
+    "token_reduction_pct": 45.34615491124588,
+    "build_time_sec": 6.740054000001692,
+    "build_time_ms_per_q": 13.480108000003383,
+    "peak_memory_kb": 2281.65625,
+    "tokenizer": "regex-approximation",
+    "ordering": {
+        "source_order": {
+            "n": 500,
+            "cov@1": 0.412,
+            "cov@3": 0.538,
+            "cov@5": 0.592,
+            "mrr": 0.5185793650793651,
+            "any_hit": 0.838
+        },
+        "bm25_only": {
+            "n": 500,
+            "cov@1": 0.55,
+            "cov@3": 0.766,
+            "cov@5": 0.814,
+            "mrr": 0.6635992063492064,
+            "any_hit": 0.838
+        },
+        "rrf": {
+            "n": 500,
+            "cov@1": 0.552,
+            "cov@3": 0.772,
+            "cov@5": 0.81,
+            "mrr": 0.6640095238095238,
+            "any_hit": 0.838
+        },
+        "legacy_15": {
+            "n": 500,
+            "cov@1": 0.412,
+            "cov@3": 0.538,
+            "cov@5": 0.59,
+            "mrr": 0.5037761793761794,
+            "any_hit": 0.844
+        }
+    }
+}

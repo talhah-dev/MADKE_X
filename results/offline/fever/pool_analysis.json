@@ -1,0 +1,18 @@
+{
+    "n": 500,
+    "task_type": "classification",
+    "avg_legacy_candidates": 14.98,
+    "avg_x_candidates": 9.98,
+    "duplicates_removed": 7,
+    "questions_with_duplicates": 7,
+    "avg_x_pool_size": 9.966,
+    "avg_legacy_tokens": 1463.248,
+    "avg_x_nodedup_tokens": 804.272,
+    "avg_x_tokens": 802.66,
+    "token_reduction_pct": 45.1453205471663,
+    "build_time_sec": 5.139429499999096,
+    "build_time_ms_per_q": 10.278858999998192,
+    "peak_memory_kb": 2322.927734375,
+    "tokenizer": "regex-approximation",
+    "ordering": null
+}

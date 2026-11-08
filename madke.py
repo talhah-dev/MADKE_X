@@ -1,150 +1,86 @@
-from tqdm import tqdm
+"""Run MADKE / MADKE-X on one dataset (command-line entry point).
+
+Examples
+--------
+Offline, deterministic (no API key)::
+
+    python madke.py --dataset_name triviaqa --mode offline --cite --verify
+
+Live, any OpenAI-compatible server (vLLM / Ollama)::
+
+    python madke.py --dataset_name nq --mode live --base_url http://localhost:8000/v1 \
+        --model Qwen/Qwen2.5-7B-Instruct-AWQ --cite --verify --start_index 0 --end_index 500
+
+Unpatched baseline (MADKE re-run) on the same questions::
+
+    python madke.py --dataset_name nq --mode live --base_url ... --model ... --legacy
+"""
+
+import os
 import warnings
-from importlib import import_module
 
-from models.chatgpt_agent import ChatGPT
-from models.gpt4_agent import GPT4
+from debate import DebateConfig, build_agents, run_debate, select_prompt
 from parser import get_args
-import prompts.triviaqa_prompt as tqa_prompt
-import prompts.hotpotqa_prompt as hotpot_prompt
-import prompts.fever_prompt as fever_prompt
-import prompts.nq_prompt as nq_prompt
-import prompts.wikimultihopqa_prompt as wikimultihopqa_prompt
-import prompts.medmc_prompt as medmc_prompt
+from utils.data_utils import (
+    DATA_FILES,
+    dataset_path,
+    print_args,
+    read_json_data,
+    verify_data_checksums,
+    write_json_data,
+)
 
-from utils.data_utils import read_json_data, write_json_data, print_args
-from utils.metrics_calculator import extract_answer, extract_answer_mc
-from utils.prompt_utils import self_choose_evidence, summary_final_answer, judge_consistency
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    def tqdm(iterable, **kwargs):
+        return iterable
+
 warnings.filterwarnings("ignore")
 
 
-def select_prompt(args):
-    if args.dataset_name == "triviaqa":
-        return tqa_prompt
-    elif args.dataset_name == "hotpotqa":
-        return hotpot_prompt
-    elif args.dataset_name == "nq":
-        return nq_prompt
-    elif args.dataset_name == "fever" or args.dataset_name == "feverous":
-        return fever_prompt
-    elif args.dataset_name == "wikimultihopqa":
-        return wikimultihopqa_prompt
-    elif args.dataset_name == "mmlu_med":
-        return medmc_prompt
-    else:
-        print("Prompt type not exist!")
-
-
-def select_extract_answer(args):
-    if args.dataset_name in ["mmlu_med"]:
-        return extract_answer_mc
-    else:
-        return extract_answer
-
-
-if __name__ == "__main__":
-    # Parameters
+def main():
     args = get_args()
     print_args(args)
 
-    prompt = select_prompt(args)
+    prompt = select_prompt(args.dataset_name)
+    cfg = DebateConfig.from_args(args)
 
-    test_dataset = read_json_data(args.test_data_path)[59:]
+    if args.test_data_path is None:
+        args.test_data_path = dataset_path(args.dataset_name, args.data_root)
+        if not args.skip_checksums:
+            verify_data_checksums(args.data_root, [args.dataset_name], strict=True)
+            print("SHA-256 verified for {}".format(args.test_data_path))
+    elif not args.skip_checksums and args.dataset_name in DATA_FILES and \
+            os.path.abspath(args.test_data_path) == os.path.abspath(dataset_path(args.dataset_name, args.data_root)):
+        verify_data_checksums(args.data_root, [args.dataset_name], strict=True)
 
-    # Define agent
-    Debaters = [ChatGPT(args, "Agent_" + str(i)) for i in range(args.agent_num)]
-    Judge = ChatGPT(args, "Judge")
-    Summarizer = ChatGPT(args, "Summarizer")
+    if args.test_output_path is None:
+        args.test_output_path = os.path.join("results", "predictions", args.dataset_name,
+                                             "{}_{}_{}.json".format(args.dataset_name, cfg.name, args.mode))
+
+    # Fix C2: no hard-coded [59:] slice -- process [start_index, end_index)
+    test_dataset = read_json_data(args.test_data_path)
+    end = min(args.end_index, len(test_dataset))
+    indices = list(range(args.start_index, end))
+    print("Processing {} questions (indices {}..{}) with config {}".format(len(indices), args.start_index, end - 1, cfg.name))
+
+    debaters, judge, summarizer = build_agents(args, args.agent_num, args.mode, args.dataset_name)
 
     all_dialog_process = []
-    for data in tqdm(test_dataset, total=len(test_dataset)):
-        question = data["question"]
-        answer = data["answer"]
-        wiki_retrieval, google_retrieval = data["wiki_retrieval"], data["google_retrieval"]
+    for i in tqdm(indices, total=len(indices)):
+        record = run_debate(test_dataset[i], debaters, judge, summarizer, prompt, cfg, index=i)
+        all_dialog_process.append(record)
+        if record["status"] == "failed":
+            print("Question {} FAILED at stage {}: {}".format(i, record["error"]["stage"], record["error"]["error"]))
+        elif len(record["trace"]["judge_verdicts"]) < cfg.max_round:
+            print("Early stop !")
+        write_json_data(args.test_output_path, all_dialog_process, verbose=False)
 
-        if args.evidence_type == "all_evidence":
-            evidence = wiki_retrieval[:args.wiki_num] + google_retrieval[:args.google_num]
-        elif args.evidence_type == "only_wiki_5":
-            evidence = wiki_retrieval[:args.wiki_num]
-        elif args.evidence_type == "only_google_5":
-            evidence = google_retrieval[:args.google_num]
-        else:
-            evidence = []
-
-        all_dialog_process.append({"question": question, "answer": answer, "llm_answers": []})
-
-        agents_dialog_history = {}
-        for agent in Debaters:
-            agents_dialog_history[agent.agent_name] = []
-
-        # Debate
-        for round_num in range(args.max_round):
-            all_agent_answer = ""
-            all_dialog_process[-1]["stop_round"] = round_num
-            all_dialog_process[-1]["Round_{}".format(round_num)] = {}
-            for num in range(args.agent_num):
-                if round_num == 0:
-                    # self choose evidence by agent
-                    if args.evidence_type == "no_evidence":
-                        chose_evi, evi_res = "", ""
-                    else:
-                        chose_evi, evi_res = self_choose_evidence(Debaters[num], question, "", evidence, prompt, args.use_self_choose, round_num)
-                    # Round 1
-                    first_prompt = prompt.debater_first_round_prompt.format(question=question, evidences=chose_evi)
-                    debater_instance = [{"role": "system", "content": prompt.debater_system_prompt},
-                                        {"role": "user", "content": first_prompt}]
-
-                    agents_dialog_history[Debaters[num].agent_name].extend(debater_instance.copy())
-                    response = Debaters[num](debater_instance)
-                    agents_dialog_history[Debaters[num].agent_name].append(response)
-                else:
-                    # self choose evidence by agent
-                    if args.evidence_type == "no_evidence":
-                        chose_evi, evi_res = "", ""
-                    else:
-                        chose_evi, evi_res = self_choose_evidence(Debaters[num], question, agents_dialog_history[Debaters[num].agent_name][-1], evidence, prompt, args.use_self_choose, round_num)
-                    # Round 2 and beyond
-                    agent_historical_answer = "Here is your historical answer: " + agents_dialog_history[Debaters[num].agent_name][-1]
-                    other_agent_historical_answer = "Answers from other Agents:\n"
-                    for agent_name in agents_dialog_history:
-                        if agent_name == Debaters[num].agent_name:
-                            continue
-                        other_agent_historical_answer += "({}) {}".format(agent_name, agents_dialog_history[agent_name][-1])
-
-                    second_beyond_prompt = prompt.debater_other_round_prompt.format(question=question,
-                                                                                    evidences=chose_evi,
-                                                                                    answer_from_other_agents=other_agent_historical_answer,
-                                                                                    your_historical_answer=agent_historical_answer)
-
-                    debater_instance = [{"role": "system", "content": prompt.debater_system_prompt},
-                                        {"role": "user", "content": second_beyond_prompt}]
-
-                    agents_dialog_history[Debaters[num].agent_name].extend(debater_instance.copy())
-                    response = Debaters[num](debater_instance)
-                    agents_dialog_history[Debaters[num].agent_name].append(response)
-
-                all_dialog_process[-1]["Round_{}".format(round_num)]["User_{}".format(num)] = debater_instance[1]["content"]
-                all_dialog_process[-1]["Round_{}".format(round_num)]["Choose_Evi_{}".format(num)] = evi_res
-                all_dialog_process[-1]["Round_{}".format(round_num)]["Agent_{}".format(num)] = response
-                all_agent_answer += "[Agent {}] {}\n".format(num, response)
-
-            # Judge
-            judge_result, judge_response = judge_consistency(Judge, question, all_agent_answer, prompt)
-            all_dialog_process[len(all_dialog_process) - 1]["Round_{}".format(round_num)]["Judge"] = judge_response
-
-            if judge_result or round_num == args.max_round - 1:
-                if round_num < args.max_round - 1:
-                    print("Early stop !")
-
-                # Summary
-                summary_result = summary_final_answer(Summarizer, all_agent_answer, question, prompt)
-                all_dialog_process[-1]["Summary"] = summary_result
-                all_dialog_process[-1]["llm_answers"] = extract_answer(summary_result)
-                break
-
-        print(all_dialog_process[-1])
-
-        write_json_data(args.test_output_path, all_dialog_process)
+    write_json_data(args.test_output_path, all_dialog_process)
+    n_failed = sum(1 for r in all_dialog_process if r["status"] == "failed")
+    print("Done. {} completed, {} failed -> {}".format(len(all_dialog_process) - n_failed, n_failed, args.test_output_path))
 
 
-
+if __name__ == "__main__":
+    main()

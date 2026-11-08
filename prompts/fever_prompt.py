@@ -93,3 +93,6 @@ other_round_choose_evidence_prompt = """Please select evidence from the evidence
 Question: {question}
 Answer: Let's think step by step! 
 """
+
+# ========== MADKE-X: citing summariser (--cite) and bounded verification (--verify) ==========
+from prompts.madke_x_prompts import summary_prompt_cite_fever as summary_prompt_cite, verify_prompt_fever as verify_prompt  # noqa: E402,F401

@@ -1,159 +1,332 @@
-import os
+"""Automatic metrics for MADKE / MADKE-X prediction records (no paid grading).
+
+Implemented here (all computed in pure Python):
+
+* EM / F1 (SQuAD definitions via :mod:`utils.evaluation_utils`)
+* ``Cons`` and ``Co2`` -- repaired definitions (fixes C5 and C6)
+* the *original* ``Cons`` formula (for the ablation table)
+* support rate and support-status distribution (Algorithm 3 outputs)
+* verification statistics (Algorithm 4 outputs)
+* paired exact McNemar test, percentile bootstrap confidence intervals
+* retrieval ordering quality: ``cov@k`` and MRR
+
+A *record* is one question's output dict as produced by :func:`debate.run_debate`
+(status, final_answer, trace.judge_verdicts, ...).  Legacy records produced by
+the original ``madke.py`` are also accepted: their judge verdicts are recovered
+from ``Round_k["Judge"]`` with the robust parser.
+"""
+
+import math
+import random
 import re
-import json
-import argparse
-import numpy as np
+
+from utils.evaluation_utils import (
+    compute_exact,
+    compute_f1,
+    extract_answer,
+    extract_choice,
+    normalize_text,
+    parse_judge_verdict,
+    parse_judge_verdict_legacy,
+)
+
+# ---------------------------------------------------------------------------
+# Record helpers
+# ---------------------------------------------------------------------------
+
+def is_completed(record):
+    return record.get("status", "completed") == "completed"
 
 
-def judge_in(file_path):
-    em_acc = []
-    with open(file_path, 'r', encoding='utf-8') as fr:
-        results = json.load(fr)
-
-        for result in results:
-            model_output = result['model_output']
-            truth_answer = result['truth_answer']
-
-            info = model_output.split('\n')
-            answer_seg = ''
-            for seg in info:
-                if 'Answer:' in seg:
-                    answer_seg = seg
-                    break
-
-            has_ture_answer = False
-            for ans in truth_answer:
-                if ans.lower() in answer_seg.lower():
-                    em_acc.append(1)
-                    has_ture_answer = True
-                    break
-            if not has_ture_answer:
-                em_acc.append(0)
-
-    acc = sum(em_acc) / len(em_acc)
-    print('acc: {}'.format(acc))
+def record_prediction(record):
+    """Final predicted answer string of a record (``None`` for failed questions)."""
+    if not is_completed(record):
+        return None
+    if record.get("final_answer") is not None:
+        return record["final_answer"]
+    answers = record.get("llm_answers", "")
+    if isinstance(answers, list):
+        return answers[-1] if answers else ""
+    return answers or ""
 
 
-def extract_answer(response):
-    # pattern = re.compile(r'[Tt]he answer.*?is(.*?)[#.]')
-    pattern = re.compile((r"\[(.*?)\]"))
-    response = response.replace('\n', '').replace('\"', '')
-    predictions = re.findall(pattern, response)
+def record_references(record):
+    answer = record.get("answer", [])
+    return answer if isinstance(answer, list) else [answer]
 
-    return predictions
 
+def _round_keys(record):
+    keys = [k for k in record if re.fullmatch(r"Round_\d+", k)]
+    return sorted(keys, key=lambda k: int(k.split("_")[1]))
+
+
+def judge_verdicts(record, legacy_parser=False):
+    """Judge verdicts per round (``"yes"``/``"no"``/``"unparsed"``), round 1 first."""
+    trace = record.get("trace") or {}
+    if "judge_verdicts" in trace and not legacy_parser:
+        return list(trace["judge_verdicts"])
+    verdicts = []
+    for key in _round_keys(record):
+        judge_reply = record[key].get("Judge", "") if isinstance(record[key], dict) else ""
+        verdicts.append(parse_judge_verdict_legacy(judge_reply) if legacy_parser else parse_judge_verdict(judge_reply))
+    return verdicts
+
+
+# ---------------------------------------------------------------------------
+# EM / F1
+# ---------------------------------------------------------------------------
+
+def em_f1_for_prediction(prediction, references):
+    refs = references or [""]
+    em = max(compute_exact(ref, prediction) for ref in refs)
+    f1 = max(compute_f1(ref, prediction) for ref in refs)
+    return em, f1
+
+
+def compute_em_f1(records):
+    """EM/F1 over completed records.  Failed records are excluded, never scored as ``""``."""
+    ems, f1s, idx = [], [], []
+    for record in records:
+        if not is_completed(record):
+            continue
+        em, f1 = em_f1_for_prediction(record_prediction(record) or "", record_references(record))
+        ems.append(float(em))
+        f1s.append(float(f1))
+        idx.append(record.get("index"))
+    n = len(ems)
+    return {
+        "exact": 100.0 * sum(ems) / n if n else 0.0,
+        "f1": 100.0 * sum(f1s) / n if n else 0.0,
+        "total": n,
+        "n_failed": sum(1 for r in records if not is_completed(r)),
+        "per_question_em": ems,
+        "per_question_f1": f1s,
+        "indices": idx,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cons / Co2 (fix C5, C6)
+# ---------------------------------------------------------------------------
+
+def compute_cons(records, legacy_parser=False):
+    """``Cons``: proportion of completed questions with a ``yes`` verdict in ANY round ``1..R_q``.
+
+    Includes the final round ``R`` (the original implementation never counted a
+    final-round agreement because it tested ``"[Yes]" in <dict>``).
+    """
+    completed = [r for r in records if is_completed(r)]
+    hits = 0
+    for r in completed:
+        if any(v == "yes" for v in judge_verdicts(r, legacy_parser)):
+            hits += 1
+    return {"cons": hits / len(completed) if completed else 0.0, "count": hits, "n_completed": len(completed)}
+
+
+def compute_co2(records, legacy_parser=False):
+    """``Co2``: completed questions with ``v_1 != yes`` and ``v_{R_q} == yes`` (agreement reached in round >= 2)."""
+    completed = [r for r in records if is_completed(r)]
+    hits = 0
+    for r in completed:
+        v = judge_verdicts(r, legacy_parser)
+        if len(v) >= 2 and v[0] != "yes" and v[-1] == "yes":
+            hits += 1
+    return {"co2": hits / len(completed) if completed else 0.0, "count": hits, "n_completed": len(completed)}
+
+
+def compute_cons_original(records, max_round=3):
+    """The ORIGINAL (buggy) ``Cons`` of ``evaluation.calculate_acc_c``.
+
+    A question counted as consistent iff it stopped before the last round, or
+    ``"[Yes]" in data["Round_<last>"]`` -- which tests dict *keys* and is
+    therefore always ``False``: final-round agreements are never counted.
+    Reproduced here for the C5 ablation table.
+    """
+    hits, n = 0, 0
+    for r in records:
+        if "stop_round" not in r:
+            continue
+        n += 1
+        stop_round = r["stop_round"]
+        if stop_round < max_round - 1:
+            hits += 1
+            continue
+        if "[Yes]" in r.get("Round_" + str(stop_round), {}):  # dict membership -> keys
+            hits += 1
+    return {"cons_original": hits / n if n else 0.0, "count": hits, "n": n}
+
+
+def average_rounds(records):
+    completed = [r for r in records if is_completed(r)]
+    if not completed:
+        return 0.0
+    return sum(len(judge_verdicts(r)) for r in completed) / len(completed)
+
+
+# ---------------------------------------------------------------------------
+# Support / verification statistics
+# ---------------------------------------------------------------------------
+
+def support_statistics(records):
+    completed = [r for r in records if is_completed(r)]
+    dist = {}
+    applicable = 0
+    supported = 0
+    cited_total = cited_valid = 0
+    for r in completed:
+        trace = r.get("trace") or {}
+        status = trace.get("support_status", "not_applicable")
+        dist[status] = dist.get(status, 0) + 1
+        if status != "not_applicable":
+            applicable += 1
+            if status == "supported":
+                supported += 1
+        cited_total += len(trace.get("cited_ids", []) or [])
+        cited_valid += len(trace.get("cited_valid_ids", []) or [])
+    return {
+        "support_rate": supported / applicable if applicable else 0.0,
+        "n_supported": supported,
+        "n_applicable": applicable,
+        "n_completed": len(completed),
+        "distribution": dist,
+        "citations_parsed": cited_total,
+        "citations_valid": cited_valid,
+    }
+
+
+def verification_statistics(records):
+    attempted = adopted = abstained = 0
+    initial_supported = final_supported = applicable = 0
+    for r in records:
+        if not is_completed(r):
+            continue
+        trace = r.get("trace") or {}
+        ver = trace.get("verification") or {}
+        if trace.get("support_status", "not_applicable") != "not_applicable":
+            applicable += 1
+            if trace.get("initial_support_status", trace.get("support_status")) == "supported":
+                initial_supported += 1
+            if trace.get("support_status") == "supported":
+                final_supported += 1
+        if ver.get("attempted"):
+            attempted += 1
+            if ver.get("adopted"):
+                adopted += 1
+            if ver.get("abstained"):
+                abstained += 1
+    return {
+        "attempted": attempted,
+        "adopted": adopted,
+        "abstained": abstained,
+        "initial_supported": initial_supported,
+        "final_supported": final_supported,
+        "n_applicable": applicable,
+        "initial_support_rate": initial_supported / applicable if applicable else 0.0,
+        "final_support_rate": final_supported / applicable if applicable else 0.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Statistics: exact McNemar and bootstrap CI
+# ---------------------------------------------------------------------------
+
+def mcnemar_exact(b, c):
+    """Two-sided exact (binomial) McNemar p-value for discordant counts ``b``, ``c``."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    tail = sum(math.comb(n, i) for i in range(0, k + 1)) / (2.0 ** n)
+    return min(1.0, 2.0 * tail)
+
+
+def paired_mcnemar(correct_a, correct_b):
+    """Paired McNemar between two aligned 0/1 correctness lists (A vs B)."""
+    assert len(correct_a) == len(correct_b)
+    b = sum(1 for x, y in zip(correct_a, correct_b) if x and not y)   # A right, B wrong
+    c = sum(1 for x, y in zip(correct_a, correct_b) if not x and y)   # A wrong, B right
+    return {"n": len(correct_a), "b_a_only": b, "c_b_only": c, "p_value": mcnemar_exact(b, c)}
+
+
+def bootstrap_ci(values, n_boot=1000, seed=0, alpha=0.05, scale=1.0):
+    """Percentile bootstrap CI of the mean (deterministic given ``seed``)."""
+    n = len(values)
+    if n == 0:
+        return (0.0, 0.0)
+    rng = random.Random(seed)
+    means = []
+    for _ in range(n_boot):
+        total = 0.0
+        for _ in range(n):
+            total += values[rng.randrange(n)]
+        means.append(total / n)
+    means.sort()
+    lo = means[int(math.floor((alpha / 2.0) * (n_boot - 1)))]
+    hi = means[int(math.ceil((1.0 - alpha / 2.0) * (n_boot - 1)))]
+    return (scale * lo, scale * hi)
+
+
+def paired_em_vectors(records_a, records_b):
+    """Align two record lists on ``index`` and return paired EM 0/1 vectors over questions completed in both."""
+    by_idx_b = {r.get("index"): r for r in records_b}
+    xs, ys, idx = [], [], []
+    for ra in records_a:
+        rb = by_idx_b.get(ra.get("index"))
+        if rb is None or not (is_completed(ra) and is_completed(rb)):
+            continue
+        em_a, _ = em_f1_for_prediction(record_prediction(ra) or "", record_references(ra))
+        em_b, _ = em_f1_for_prediction(record_prediction(rb) or "", record_references(rb))
+        xs.append(int(em_a))
+        ys.append(int(em_b))
+        idx.append(ra.get("index"))
+    return xs, ys, idx
+
+
+# ---------------------------------------------------------------------------
+# Retrieval ordering quality (cov@k, MRR)
+# ---------------------------------------------------------------------------
+
+def passage_contains_any(passage_text, answers):
+    norm_passage = normalize_text(passage_text)
+    for a in answers:
+        na = normalize_text(a)
+        if na and na in norm_passage:
+            return True
+    return False
+
+
+def first_hit_rank(ordered_texts, answers):
+    """1-based rank of the first passage lexically containing a gold answer (``None`` if absent)."""
+    for rank, text in enumerate(ordered_texts, start=1):
+        if passage_contains_any(text, answers):
+            return rank
+    return None
+
+
+def coverage_and_mrr(hit_ranks, ks=(1, 3, 5)):
+    n = len(hit_ranks)
+    out = {"n": n}
+    for k in ks:
+        out["cov@{}".format(k)] = (sum(1 for r in hit_ranks if r is not None and r <= k) / n) if n else 0.0
+    out["mrr"] = (sum((1.0 / r) for r in hit_ranks if r is not None) / n) if n else 0.0
+    out["any_hit"] = (sum(1 for r in hit_ranks if r is not None) / n) if n else 0.0
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible helpers from the original module
+# ---------------------------------------------------------------------------
 
 def extract_answer_mc(response):
-    # pattern = re.compile(r'[Tt]he answer.*?is(.*?)[#.]')
-    pattern = re.compile((r"\((.*?)\)"))
-    response = response.replace('\n', '').replace('\"', '')
-    predictions = re.findall(pattern, response)
-
-    return predictions
+    pattern = re.compile(r"\((.*?)\)")
+    response = (response or "").replace("\n", "").replace('"', "")
+    return re.findall(pattern, response)
 
 
-def extract_choice(response):
-    pattern = r'\[(\w)\]'
-    matches = re.findall(pattern, response)
-
-    answer = ""
-
-    for match_str in matches[::-1]:
-        solution = match_str.upper()
-        if solution:
-            answer = solution
-            break
-
-    return answer
-
-
-def multi_agent_calculate(file_path, dataset_name):
-    
-    eval_file_path = file_path.replace("/predictions/", "/evaluations/")[:-5] + "_eval.json"
-
-    eval_results = {}
-    if os.path.exists(eval_file_path):
-        with open(eval_file_path, "r", encoding="utf-8") as fr_eval:
-            for result in json.load(fr_eval):
-                eval_results[result["question"]] = result
-
-    em_acc = []
-    early_stop_acc = []
-    avg_round, all_round = 0.0, 0.0
-    round_keys = ["Round_6", "Round_5", "Round_4", "Round_3", "Round_2", "Round_1", "Round_0"]
-    with open(file_path, 'r', encoding='utf-8') as fr:
-        results = json.load(fr)
-        not_early_stop = 0
-        for idx, result in enumerate(results):
-            question = result["question"]
-            early_stop_flag = True
-            for key in round_keys:
-                if key in result.keys():
-                    all_round += int(key[-1]) + 1
-                    if "[Yes]" not in result[key]["Judge"]:
-                        not_early_stop += 1
-                        early_stop_flag = False
-                    break
-            if early_stop_flag:
-                if len(eval_results) > 0:
-                    eval_result = eval_results[question]["eval_gpt4"]
-                    if "[True]" in eval_result:
-                        early_stop_acc.append(1.0)
-                    else:
-                        early_stop_acc.append(0.0)
-
-
-            if dataset_name == 'mmlu':
-                truth_answer = result['answer'][1:2].lower()
-            else:
-                truth_answer = [x.lower().strip("'") for x in result['answer']]
-
-            response = result["Summary"]
-            if dataset_name == 'mmlu':
-                agent_answers = extract_choice(response)
-            else:
-                agent_answers = extract_answer(response)
-
-            agent_answers = [x.lower() for x in agent_answers]
-            flag = False
-
-            if len(agent_answers) > 0 and agent_answers[0] in truth_answer:
-                flag = True
-            if flag:
-                em_acc.append(1.0)
-            else:
-                em_acc.append(0.0)
-    if len(early_stop_acc) == 0:
-        print('avg round: {}, acc: {} {}, not early stop: {} from {}'.format(all_round / len(results), np.mean(em_acc), np.std(em_acc) / (len(em_acc) ** 0.5), not_early_stop,  file_path))
-    else:
-        print(sum(early_stop_acc), len(early_stop_acc))
-        print(
-            'avg round: {}, acc: {} {}, not early stop: {}, early stop acc: {} from {}'.format(all_round / len(results),
-                                                                                               np.mean(em_acc),
-                                                                                               np.std(em_acc) / (
-                                                                                                           len(em_acc) ** 0.5),
-                                                                                               not_early_stop,
-                                                                                               sum(early_stop_acc) / len(
-                                                                                                   early_stop_acc),
-                                                                                               file_path))
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('')
-    parser.add_argument("--result_sa_path", type=str, default="../results/predictions/select_100_single_agent")
-    parser.add_argument("--result_ma_path", type=str, default="../results/predictions/select_100_multi_agent")
-    args = parser.parse_args()
-
-    print("================ fever 500 =================")
-    fever_path = "../results/predictions/fever"
-    file_paths = os.listdir(fever_path)
-    for file_path in file_paths:
-        multi_agent_calculate(os.path.join(fever_path, file_path), file_path.split('_')[0])
-
-    print("================ feverous 500 =================")
-    feverous_path = "../results/predictions/feverous"
-    file_paths = os.listdir(feverous_path)
-    for file_path in file_paths:
-        multi_agent_calculate(os.path.join(feverous_path, file_path), file_path.split('_')[0])
-
-    
+__all__ = [
+    "extract_answer", "extract_answer_mc", "extract_choice",
+    "compute_em_f1", "compute_cons", "compute_co2", "compute_cons_original", "average_rounds",
+    "support_statistics", "verification_statistics",
+    "mcnemar_exact", "paired_mcnemar", "bootstrap_ci", "paired_em_vectors",
+    "first_hit_rank", "coverage_and_mrr", "judge_verdicts", "record_prediction", "is_completed",
+]

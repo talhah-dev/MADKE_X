@@ -1,0 +1,54 @@
+{
+    "n_records": 500,
+    "n_checks": 4003,
+    "n_passed": 4003,
+    "pass_rate": 1.0,
+    "all_passed": true,
+    "per_invariant": {
+        "I1_status_and_answer": {
+            "checked": 500,
+            "passed": 500,
+            "failures": []
+        },
+        "I2_pool_manifest_dedup_rrf": {
+            "checked": 500,
+            "passed": 500,
+            "failures": []
+        },
+        "I3_evidence_ids_bounds_cap_order": {
+            "checked": 500,
+            "passed": 500,
+            "failures": []
+        },
+        "I4_judge_verdicts_early_stop": {
+            "checked": 500,
+            "passed": 500,
+            "failures": []
+        },
+        "I5_citations_support_reproducible": {
+            "checked": 500,
+            "passed": 500,
+            "failures": []
+        },
+        "I6_bounded_verification": {
+            "checked": 500,
+            "passed": 500,
+            "failures": []
+        },
+        "I7_summariser_binding": {
+            "checked": 500,
+            "passed": 500,
+            "failures": []
+        },
+        "I8_call_accounting": {
+            "checked": 500,
+            "passed": 500,
+            "failures": []
+        }
+    },
+    "dataset_level": {
+        "D1_all_indices_processed": true,
+        "D2_cons_co2_consistent": true,
+        "D3_only_completed_scored": true
+    }
+}

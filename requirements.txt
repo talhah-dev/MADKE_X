@@ -1,0 +1,8 @@
+# MADKE-X has NO hard third-party dependency: the offline runner, the metrics and
+# the OpenAI-compatible client use only the Python >= 3.8 standard library.
+#
+# Optional extras:
+tqdm>=4.60          # progress bars in madke.py
+tiktoken>=0.5       # exact cl100k_base token counts (a regex approximation is used otherwise)
+# vllm / ollama are installed on the GPU machine that SERVES the model (see MADKE_X_Kaggle_Colab.ipynb),
+# they are not needed on the machine that runs the experiments.

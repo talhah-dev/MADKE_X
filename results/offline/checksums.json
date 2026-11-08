@@ -1,0 +1,32 @@
+{
+    "triviaqa": {
+        "path": ".\\data\\triviaqa\\triviaqa_test_all_retrieval_500.json",
+        "expected": "6b6a0c65c21d82757351365d1cf0a0c4d629f783b73273a6249152ad6409666e",
+        "actual": "6b6a0c65c21d82757351365d1cf0a0c4d629f783b73273a6249152ad6409666e",
+        "ok": true
+    },
+    "nq": {
+        "path": ".\\data\\nq\\nq_test_all_retrieval_500.json",
+        "expected": "f1494bf6f1f97e2faac8312dbb81efdfe67a5a1e77057b8f6fbb5177addf7f2f",
+        "actual": "f1494bf6f1f97e2faac8312dbb81efdfe67a5a1e77057b8f6fbb5177addf7f2f",
+        "ok": true
+    },
+    "hotpotqa": {
+        "path": ".\\data\\hotpotqa\\hotpotqa_dev_all_retrieval_500.json",
+        "expected": "839d2c1faa09e491eb4260ce9ff786c370744a5fbc03e2238873fd5f92773594",
+        "actual": "839d2c1faa09e491eb4260ce9ff786c370744a5fbc03e2238873fd5f92773594",
+        "ok": true
+    },
+    "wikimultihopqa": {
+        "path": ".\\data\\wikimultihopqa\\wikimultihopqa_dev_all_retrieval_500.json",
+        "expected": "6aa08ee7c6639fa72d21119dbca25dec1e2bf31a4f5da9796a99385afbd87ed6",
+        "actual": "6aa08ee7c6639fa72d21119dbca25dec1e2bf31a4f5da9796a99385afbd87ed6",
+        "ok": true
+    },
+    "fever": {
+        "path": ".\\data\\fever\\fever_dev_all_retrieval_500.json",
+        "expected": "3fa23b42177c53a2f6e76f65786a238d64445cd3d1606fde7dfe3d923065d279",
+        "actual": "3fa23b42177c53a2f6e76f65786a238d64445cd3d1606fde7dfe3d923065d279",
+        "ok": true
+    }
+}
