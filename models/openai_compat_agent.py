@@ -161,6 +161,23 @@ class OpenAICompatAgent(BaseAgent):
                            latency=time.time() - start)
 
 
+def preflight(args, retries=1):
+    """Send one tiny chat request before a live run.
+
+    Returns ``(ok, message)``.  A live run must not start when this fails: without
+    a reachable server every call fails and no model output is produced.
+    """
+    agent = OpenAICompatAgent(args, "Preflight", max_retries=retries, temperature=0.0, max_tokens=16)
+    res = agent([{"role": "user", "content": "Reply with the single word: OK"}])
+    if res.ok and res.text.strip():
+        return True, "endpoint {} answered with model {!r}: {!r}".format(agent.url, agent.model, res.text.strip()[:60])
+    if res.ok:
+        return False, "endpoint {} returned an EMPTY reply for model {!r}".format(agent.url, agent.model)
+    return False, ("endpoint {} is not usable for model {!r}: {}\n"
+                   "  -> Is the model server running (vLLM / Ollama) and is --base_url / --model correct?").format(
+        agent.url, agent.model, res.error)
+
+
 def build_agent(args, name, mode=None):
     """Factory: ``ScriptedAgent`` for ``--mode offline`` else :class:`OpenAICompatAgent`."""
     mode = mode or _getattr(args, "mode", "live")

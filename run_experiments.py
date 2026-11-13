@@ -33,7 +33,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from debate import legacy_config, madke_x_config, run_debate, select_prompt
-from models.openai_compat_agent import OpenAICompatAgent
+from models.openai_compat_agent import OpenAICompatAgent, preflight
 from models.scripted_agent import ScriptedAgent
 from parser import add_agent_backend_args
 from utils.calculate_tokens import count_tokens, tokenizer_name
@@ -140,7 +140,17 @@ def failed_record(data, index, cfg, error):
 # Running a configuration (with optional per-question checkpointing)
 # ---------------------------------------------------------------------------
 
-def run_records(data, indices, cfg, prompt, agents, checkpoint=None, concurrency=1, retry_failed=False, label=""):
+class LiveRunAborted(RuntimeError):
+    """Raised when too many consecutive questions hit failed model calls."""
+
+
+def record_had_call_failure(rec):
+    """True if a question failed (MADKE-X) or carried a failed call on (legacy)."""
+    return rec.get("status") == "failed" or (rec.get("trace") or {}).get("call_failures", 0) > 0
+
+
+def run_records(data, indices, cfg, prompt, agents, checkpoint=None, concurrency=1, retry_failed=False, label="",
+                max_consecutive_failures=0):
     debaters, judge, summarizer = agents
     done = {}
     if checkpoint and os.path.exists(checkpoint):
@@ -162,20 +172,45 @@ def run_records(data, indices, cfg, prompt, agents, checkpoint=None, concurrency
     results = dict(done)
     lock = threading.Lock()
     t0 = time.time()
-    progress = {"n": 0}
+    progress = {"n": 0, "consecutive_failures": 0}
+    stop = threading.Event()
 
     def work(i):
+        if stop.is_set():
+            return None
         try:
             return run_debate(data[i], debaters, judge, summarizer, prompt, cfg, index=i)
         except Exception as ex:  # never lose a run because of one question
             return failed_record(data[i], i, cfg, "runner exception {}: {}".format(type(ex).__name__, ex))
 
+    pending = []   # failed records of the current failure streak (kept only if the streak ends)
+
+    def commit(rec):
+        results[rec["index"]] = rec
+        if checkpoint:
+            append_jsonl(checkpoint, rec)
+        progress["n"] += 1
+
     def store(rec):
+        if rec is None:
+            return
         with lock:
-            results[rec["index"]] = rec
-            if checkpoint:
-                append_jsonl(checkpoint, rec)
-            progress["n"] += 1
+            if max_consecutive_failures:
+                if record_had_call_failure(rec):
+                    pending.append(rec)
+                    if len(pending) >= max_consecutive_failures:
+                        stop.set()
+                        last = rec.get("error") or {}
+                        raise LiveRunAborted(
+                            "{}: {} consecutive questions had failed model calls (last error: {}). The run was "
+                            "stopped and these questions were NOT checkpointed, so a re-run will retry them. "
+                            "Check that the model server is running and --base_url/--model are correct.".format(
+                                label, len(pending), last.get("error") or "call failure carried on (legacy)"))
+                    return
+                for old in pending:   # isolated failures: keep them
+                    commit(old)
+                pending.clear()
+            commit(rec)
             n = progress["n"]
             if label and (n % 25 == 0 or n == len(todo)):
                 elapsed = time.time() - t0
@@ -185,11 +220,20 @@ def run_records(data, indices, cfg, prompt, agents, checkpoint=None, concurrency
         if concurrency > 1:
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 futures = [pool.submit(work, i) for i in todo]
-                for fut in as_completed(futures):
-                    store(fut.result())
+                try:
+                    for fut in as_completed(futures):
+                        store(fut.result())
+                except LiveRunAborted:
+                    for f in futures:
+                        f.cancel()
+                    raise
         else:
             for i in todo:
                 store(work(i))
+    with lock:   # a short failure streak at the very end is genuine: keep it
+        for old in pending:
+            commit(old)
+        pending.clear()
     return [results[i] for i in indices if i in results]
 
 
@@ -624,12 +668,12 @@ def render_table10(results, tag):
         for key in ("legacy", "x"):
             m = results[d][key]
             pr = results[d]["paired"]
-            rows.append([d, m["system"], m["n"], m["n_failed"], "{} {}".format(num(m["f1"], 1), ci(m["f1_ci95"])),
+            rows.append([d, m["system"], m["n"], m["n_failed"], m["diagnostics"].get("scored_despite_failed_call", 0), "{} {}".format(num(m["f1"], 1), ci(m["f1_ci95"])),
                          "{} {}".format(num(m["exact"], 1), ci(m["exact_ci95"])), pct(m["cons"]), pct(m["co2"]),
                          pct(m["support"]["support_rate"]) if m["support"]["n_applicable"] else "n/a",
                          pval(pr["p_value"]) if key == "x" else "-", num(m["avg_rounds"])])
     out = ["## Table 10. Live results ({})".format(tag), "",
-           md_table(["Dataset", "System", "Questions", "Failed", "F1 [CI95]", "EM [CI95]", "Cons", "Co2", "Support rate", "McNemar p (EM vs legacy)", "Avg rounds"], rows), ""]
+           md_table(["Dataset", "System", "Questions", "Failed", "Scored despite failed call", "F1 [CI95]", "EM [CI95]", "Cons", "Co2", "Support rate", "McNemar p (EM vs legacy)", "Avg rounds"], rows), ""]
     rows = []
     for d in datasets:
         inv = results[d]["invariants"]
@@ -656,7 +700,8 @@ def dataset_results(args, dataset_name, data, indices, out_dir, checkpoint=False
         ckpt = os.path.join(out_dir, dataset_name, cfg.name + ".jsonl") if checkpoint else None
         t0 = time.time()
         recs = run_records(data, indices, cfg, prompt, agents, checkpoint=ckpt, concurrency=args.concurrency,
-                           retry_failed=args.retry_failed, label="{}/{}".format(dataset_name, cfg.name))
+                           retry_failed=args.retry_failed, label="{}/{}".format(dataset_name, cfg.name),
+                           max_consecutive_failures=(args.max_consecutive_failures if args.mode == "live" else 0))
         log("{} {}: {} questions in {:.1f}s ({} failed)".format(dataset_name, cfg.name, len(recs), time.time() - t0,
                                                               sum(1 for r in recs if r["status"] == "failed")))
         write_json_data(os.path.join(out_dir, dataset_name, cfg.name + ".json"), recs, verbose=False)
@@ -700,6 +745,9 @@ def main(argv=None):
     parser.add_argument("--rrf_k", type=int, default=60)
     parser.add_argument("--concurrency", type=int, default=1, help="Parallel questions (live mode).")
     parser.add_argument("--retry_failed", action="store_true", help="Re-run checkpointed questions that failed.")
+    parser.add_argument("--max_consecutive_failures", type=int, default=5,
+                        help="Live mode: stop the run after this many consecutive questions with failed calls (0 = never).")
+    parser.add_argument("--skip_preflight", action="store_true", help="Live mode: do not test the endpoint before running.")
     parser.add_argument("--fail_demo", type=int, default=100,
                         help="Offline: questions per dataset for the injected-failure demonstration (0 disables).")
     parser.add_argument("--fail_demo_rate", type=float, default=0.02, help="Per-call failure rate of that demonstration.")
@@ -710,6 +758,21 @@ def main(argv=None):
     if args.mode == "live" and not args.model and not (args.endpoint and args.deployment_id):
         parser.error("--mode live requires --model (and --base_url) or --endpoint/--deployment_id")
 
+    if args.mode == "live" and not args.skip_preflight:
+        ok, msg = preflight(args)
+        log(("PREFLIGHT OK: " if ok else "PREFLIGHT FAILED: ") + msg)
+        if not ok:
+            log("No live run was started. Start the model server first (see MADKE_X_Kaggle_Colab.ipynb).")
+            return 2
+
+    try:
+        return _run(args)
+    except LiveRunAborted as ex:
+        log("LIVE RUN ABORTED: {}".format(ex))
+        return 3
+
+
+def _run(args):
     t_start = time.time()
     tag = args.run_tag or (slugify(args.model) if args.mode == "live" else "offline")
     out_dir = args.out_dir or (os.path.join("results", "offline") if args.mode == "offline" else os.path.join("results", "live", tag))

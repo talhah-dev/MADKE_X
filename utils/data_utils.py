@@ -38,13 +38,16 @@ DATA_FILES = {
     "fever": os.path.join("data", "fever", "fever_dev_all_retrieval_500.json"),
 }
 
-# SHA-256 digests of the five raw dataset files (pinned; see DATA_CHECKSUMS.sha256).
+# SHA-256 digests of the five raw dataset files, computed over the content with
+# line endings normalised to LF (see DATA_CHECKSUMS.sha256).  Normalising makes
+# the check give the same result on Windows (git core.autocrlf -> CRLF), Linux,
+# Kaggle and Colab; the digests equal those of the files as stored on GitHub.
 DATA_SHA256 = {
-    "triviaqa": "6b6a0c65c21d82757351365d1cf0a0c4d629f783b73273a6249152ad6409666e",
-    "nq": "f1494bf6f1f97e2faac8312dbb81efdfe67a5a1e77057b8f6fbb5177addf7f2f",
-    "hotpotqa": "839d2c1faa09e491eb4260ce9ff786c370744a5fbc03e2238873fd5f92773594",
-    "wikimultihopqa": "6aa08ee7c6639fa72d21119dbca25dec1e2bf31a4f5da9796a99385afbd87ed6",
-    "fever": "3fa23b42177c53a2f6e76f65786a238d64445cd3d1606fde7dfe3d923065d279",
+    "triviaqa": "7083765ac96a578f529ed9f1d4bbce1ad2da2fb027cbb2c93944fef9f4a398f2",
+    "nq": "491cc7e9274dbffd0d92f380b3821b59a8e0ae59e2bc1313265e2c9196c4cca9",
+    "hotpotqa": "81cbae49b334726fbd7c00eae4259e6b49dfb365968332bda81c0dd2332ddae9",
+    "wikimultihopqa": "35b78a082404f24bb35355330135f2a20c981fe53adc10a8721639d8aca274a3",
+    "fever": "532a678af035acfcc943e61b3b246ca4b2c7b92aec1eccd4625b83c2db7f3b32",
 }
 
 CLASSIFICATION_DATASETS = ("fever", "feverous")
@@ -55,12 +58,16 @@ def task_type(dataset_name):
     return "classification" if dataset_name in CLASSIFICATION_DATASETS else "extractive"
 
 
-def sha256_file(file_path, chunk_size=1 << 20):
-    h = hashlib.sha256()
+def sha256_file(file_path, normalize_newlines=True):
+    """SHA-256 of a file; by default CRLF/CR line endings are normalised to LF first.
+
+    The file is only read, never modified.
+    """
     with open(file_path, "rb") as fr:
-        for chunk in iter(lambda: fr.read(chunk_size), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        data = fr.read()
+    if normalize_newlines:
+        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(data).hexdigest()
 
 
 def sha256_text(text):
@@ -87,9 +94,12 @@ def verify_data_checksums(data_root=".", datasets=None, strict=True):
             entry["actual"] = sha256_file(path)
             entry["ok"] = entry["actual"] == entry["expected"]
         report[name] = entry
+        if os.path.isfile(path):
+            entry["raw_bytes_sha256"] = sha256_file(path, normalize_newlines=False)
         if strict and not entry["ok"]:
             raise RuntimeError(
-                "Data integrity check failed for '{}' ({}): expected sha256 {} got {}".format(
+                "Data integrity check failed for '{}' ({}): expected sha256 {} got {} "
+                "(line-ending-normalised). The file content differs from the shipped data.".format(
                     name, path, entry["expected"], entry["actual"]))
     return report
 

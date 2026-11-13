@@ -65,6 +65,13 @@ def main():
     indices = list(range(args.start_index, end))
     print("Processing {} questions (indices {}..{}) with config {}".format(len(indices), args.start_index, end - 1, cfg.name))
 
+    if args.mode == "live":
+        from models.openai_compat_agent import preflight
+        ok, msg = preflight(args)
+        print(("PREFLIGHT OK: " if ok else "PREFLIGHT FAILED: ") + msg)
+        if not ok:
+            raise SystemExit("No run started: start the model server first.")
+
     debaters, judge, summarizer = build_agents(args, args.agent_num, args.mode, args.dataset_name)
 
     all_dialog_process = []

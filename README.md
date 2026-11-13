@@ -39,7 +39,13 @@ python evaluation.py --prediction_path results/live/<model>/nq/madke_x.json --co
 ## Data integrity (read-only)
 
 The five raw files under `data/` are never modified. Their SHA-256 digests are pinned in `DATA_CHECKSUMS.sha256`
-and in `utils/data_utils.DATA_SHA256`; every run verifies them (`sha256sum -c DATA_CHECKSUMS.sha256` does the same).
+and in `utils/data_utils.DATA_SHA256`; every run verifies them. The digests are computed with line endings
+normalised to LF, so a Windows checkout (git `core.autocrlf`, CRLF) and a Linux / Kaggle / Colab copy give the
+same result; on Linux `sha256sum -c DATA_CHECKSUMS.sha256` verifies the files directly.
+
+Live runs first send one test request to the endpoint (preflight) and do not start if it fails; a run also stops
+after `--max_consecutive_failures` (default 5) questions in a row whose model calls failed, without checkpointing
+them, so an unreachable server can never produce an "empty" result table.
 
 ## What changed (Section 4 of the paper)
 
