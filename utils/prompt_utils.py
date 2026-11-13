@@ -73,7 +73,7 @@ def call_agent(agent, messages):
 
 def _result_dict(result, **extra):
     out = {"ok": result.ok, "reply": result.text, "error": result.error, "attempts": result.attempts,
-           "latency": result.latency, "usage": result.usage}
+           "latency": result.latency, "usage": result.usage, "meta": getattr(result, "meta", None) or {}}
     out.update(extra)
     return out
 
@@ -117,6 +117,8 @@ def self_choose_evidence(agent, question, history_response, evi_pool, prompt, us
         parsed = parse_evidence_ids(result.text, len(evi_pool), cap=cap)
 
     chosen_text = format_chosen_evidence(evi_pool, parsed.ids)
+    if legacy and not parsed.ids and not parsed.not_found:
+        chosen_text = "Evidence: "            # the release prints the bare label when it could read no identifier
     parse = {"selected_ids": list(parsed.ids), "dropped_ids": list(parsed.dropped), "ignored_ids": list(parsed.ignored),
              "out_of_range_ids": list(parsed.out_of_range), "not_found": bool(parsed.not_found)}
     return _result_dict(result, chosen_text=chosen_text, ids=list(parsed.ids), parse=parse, prompt=evi_prompt)

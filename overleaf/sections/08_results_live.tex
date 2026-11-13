@@ -1,0 +1,36 @@
+\section{End-to-end comparison with a live model}
+\label{sec:live}
+
+This section addresses RQ4. Accuracy can be measured only with a language model, and a fair comparison requires that MADKE and MADKE-X answer the same questions with the same model, the same debate prompts and the same sampling parameters. The release is therefore run again under the harness of MADKE-X. The published numbers are not used as the baseline, because they come from other models and another infrastructure.
+
+\subsection{Choice of comparison}
+The original evaluation used three backbones. Two of them are reached through paid commercial interfaces, and the third, with 72 billion parameters, cannot be served on freely available hardware. The comparison here is restricted to systems whose code is public and can be run under identical conditions: MADKE, through the logic of its release, and MADKE-X. The single-agent and debate baselines of the original paper (SP, CoT, SC, RAG and MAD) are not part of the release. Implementing them anew would add differences in prompts and parsing that could not be told apart from the methods themselves. Their published numbers are reported for reference in Table~\ref{tab:published} and are kept out of the comparison of the two re-run systems.
+
+\subsection{Models and infrastructure}
+Two open-weight models serve as backbones. Qwen1.5-32B-Chat \cite{bai2023qwen} is one of the backbones of the MADKE paper. Qwen2.5-7B-Instruct \cite{yang2024qwen25} is smaller and more recent, and with it all questions can be processed in the compute that is available. Both models are served by Ollama with 4-bit quantised weights through its OpenAI-compatible endpoint, on a cloud notebook with two NVIDIA T4 GPUs of 16\,GB each. For the smaller model one server runs on each GPU and the datasets are split between the two.
+
+The temperature is 0.5 as in MADKE, and a reply is limited to 512 tokens. The context window is set to 8,192 tokens. The longest prompt of either system is the selection prompt of the release, which stays below 2,800 tokens of the cl100k\_base tokenizer. Every call passes through the client of Eq.~\eqref{eq:call}. A run starts only after a test request to the endpoint has succeeded, and it stops by itself when five consecutive questions contain failed calls, so that an unreachable server cannot produce an empty table of results. Questions are processed in batches by index. Each finished question is written to a checkpoint at once, and an interrupted run resumes without repeating questions. The reference statistics of the governor do not depend on the batch, so a run in batches builds the same pools as a single run.
+
+The serving set-up was tried with two questions per dataset for both models and both systems, using an earlier version of the code. All calls succeeded. A trial of this size permits no statement on accuracy, and its outcomes are not reported.
+
+\subsection{Results}
+Table~\ref{tab:live} reports EM and F1 for the four question-answering datasets, EM for FEVER, and Cons and Co2, for both systems on the same questions. The number of completed and of failed questions is stated in the table. Paired exact McNemar tests on EM and 95\% bootstrap intervals are reported with the final numbers. Cells marked ``--'' are pending: the corresponding runs had not finished when this version of the manuscript was prepared. No value in the table is estimated or extrapolated.
+
+\input{generated/tab_live}
+
+\subsection{Published results for reference}
+Table~\ref{tab:published} copies the main results of the MADKE paper \cite{wang2025madke} from Table~2 of its arXiv version (arXiv:2312.04854v2). The values were not measured again. They document the size of the differences that the original evaluation reports and are not a comparison with Table~\ref{tab:live}: they were obtained with other backbones, the G4 columns rest on a GPT-4 judge, and the code that produced them cannot be identified with the public release (Section~\ref{sec:audit}).
+
+\input{generated/tab_published}
+
+Several published margins are small for the number of questions. Figure~\ref{fig:power} takes each of the \VPowN{} margins between MADKE and its strongest baseline on the share metrics of Table~\ref{tab:published} (GPT-4 score and FEVER exact match) and gives the number of questions per method that Eq.~\eqref{eq:power} requires for 80\% power at the 5\% level. \VPowOver{} of the \VPowN{} margins need more than 500 questions and \VPowOverTwoK{} need more than 2,000; in \VPowBelow{} cases MADKE lies below its strongest baseline. The published evaluation scored all methods on one sample of questions per dataset, so a paired test on its per-question outcomes would be more sensitive than this calculation, but those outcomes are not published. The calculation explains why the live comparison of this study is paired and why its primary test pools the five datasets.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.92\textwidth]{fig_power}
+\caption{Questions per method needed to detect each published margin between MADKE and its strongest baseline with 80\% power (two-sided test of two proportions at the 5\% level, Eq.~\ref{eq:power}). The label gives the backbone, the dataset and the margin in percentage points. The vertical line marks the 500 questions of the benchmark files.}
+\label{fig:power}
+\end{figure}
+
+\subsection{Analyses that the live records support}
+The records of a live run contain everything that the offline analyses use, so the following quantities can be computed from them without further model calls: the share of selection replies that the parser of the release would have read differently, and the share of agreeing judge replies that its verdict test would have missed, both for a real model; the share of questions on which the agents agreed on a wrong answer ($\mathrm{Cons}-\mathrm{Co2}$); the distribution of the support status for correct and for incorrect answers; the number of questions on which verification was triggered and adopted; and the number of rounds, calls and input tokens per question for both systems. An ablation that switches the components of MADKE-X on one at a time needs further runs and is planned for the smaller model, which processes a dataset fastest.

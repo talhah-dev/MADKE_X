@@ -1,0 +1,12 @@
+\section{Introduction}
+\label{sec:introduction}
+
+Large language models (LLMs) answer knowledge-intensive questions less reliably than their fluency suggests, and a standard remedy is to give several model instances the same question and let them critique each other \cite{du2024debate,liang2024divergent,smit2024mad}. MADKE \cite{wang2025madke} adds external knowledge to this debate: a shared pool of Wikipedia and web passages from which each agent selects at most three items per round, a judge that stops the debate when the agents agree, and a summariser that writes the final answer. It is reported to outperform single-agent prompting, chain-of-thought \cite{wei2022cot}, self-consistency \cite{wang2023sc}, retrieval-augmented generation \cite{lewis2020rag} and plain debate on five benchmarks.
+
+An audit of the released implementation \cite{ali2026audit} showed that the published pipeline does not behave as described and offers no way to see why it produced an answer. A first set of repairs and their offline proofs was reported separately (Part~II). This paper turns them into one method, MADKE-X, and evaluates it in the way MADKE was evaluated, so that the two systems can be compared on the same footing. Our contributions are:
+\begin{enumerate}
+\item MADKE-X, a refinement of MADKE with four components (Section~\ref{sec:method}), a complexity analysis (Section~\ref{sec:complexity}) and a bounded verification step that is new in this paper;
+\item a comparison protocol that reproduces the evaluation design of MADKE and adds paired statistics, so that every claimed difference can be tested (Section~\ref{sec:design});
+\item offline evidence on the shipped, unaltered data that MADKE-X is correct where MADKE is not, better ordered, cheaper per call and traceable (Section~\ref{sec:offline});
+\item an explicit separation of what is demonstrated from what is not: accuracy is not measured, and the empty cells of Table~\ref{tab:main} are the deliverable of the next experiment.
+\end{enumerate}

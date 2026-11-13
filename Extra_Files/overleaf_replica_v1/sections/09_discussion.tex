@@ -1,0 +1,8 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Where MADKE-X is better, and where this is shown.} MADKE-X is better than MADKE in correctness (every tested invariant), in evidence ordering (answer-bearing passages come earlier, with paired significance), in per-call input size (about 45\% smaller listing, estimated), in completeness (all 500 questions, failures flagged not scored) and in explainability (a trace and a support check for every answer). It is slower only by the order of a millisecond per question, and uses the same memory.
+
+\paragraph{Where this is not shown} We do not show that MADKE-X answers more questions correctly. The ordering gain is a property of the evidence, models may use the pool differently from our counts, and the smaller pool lowers the coverage ceiling slightly. Document-level retrieval failures remain: only 50.5\% (HotpotQA) and 40.4\% (2WikiMQA) of questions have any answer-bearing passage at all. A label-free pool-sufficiency gate did not work (AUC 0.475--0.616) and is not part of MADKE-X. The support check is lexical, so it can mark a correct paraphrase as unsupported and a coincidental string as supported.
+
+\paragraph{Practical value} For a deployed question-answering system, traceability and bounded failure handling matter independently of accuracy: they make every answer inspectable, make failures countable, and make comparisons between configurations reproducible.

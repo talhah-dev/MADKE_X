@@ -17,6 +17,7 @@ the same questions as MADKE-X.
 
 import time
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 
 import prompts.fever_prompt as fever_prompt
 import prompts.hotpotqa_prompt as hotpot_prompt
@@ -30,6 +31,7 @@ from utils.data_utils import build_pool, legacy_pool, pool_manifest, select_evid
 from utils.evaluation_utils import (
     extract_answer,
     extract_final_answer,
+    is_verdict_answer,
     normalize_text,
     parse_citations,
     support_check,
@@ -61,6 +63,25 @@ def select_prompt(dataset_name):
     raise ValueError("Prompt type not exist for dataset '{}'".format(dataset_name))
 
 
+# Version of the pipeline behaviour.  It is stored in every record; checkpoints written by a
+# different version are not resumed, so results of different versions are never mixed.
+#   1.0.0  first MADKE-X release
+#   1.1.0  support check matches whole words; verdict answers (yes / no / FEVER labels) are
+#          reported as not_applicable and never trigger verification; BM25 statistics come from
+#          the dataset-level reference index (Algorithm 2, index B) instead of the single pool
+#   1.2.0  the evidence selection is read from the END of the reply (the last k distinct
+#          identifiers, delivered in written order), so passages that are only discussed
+#          before the selection are not delivered; Co2 is the consistent-and-correct ratio
+#          of MADKE (earlier versions reported late agreement under that name); token
+#          counts include the system message
+CODE_VERSION = "1.2.0"
+
+
+@lru_cache(maxsize=64)
+def _system_tokens(text):
+    return count_tokens(text or "")
+
+
 @dataclass
 class DebateConfig:
     dataset_name: str = "triviaqa"
@@ -86,6 +107,7 @@ class DebateConfig:
     def to_dict(self):
         d = asdict(self)
         d["task_type"] = self.task_type
+        d["code_version"] = CODE_VERSION
         return d
 
     @classmethod
@@ -128,8 +150,12 @@ def build_agents(args, agent_num, mode=None, dataset_name=None):
 _EMPTY_PARSE = {"selected_ids": [], "dropped_ids": [], "ignored_ids": [], "out_of_range_ids": [], "not_found": False}
 
 
-def run_debate(data, debaters, judge, summarizer, prompt, cfg, index=None):
-    """Run the full debate for one question and return its record (see module docstring)."""
+def run_debate(data, debaters, judge, summarizer, prompt, cfg, index=None, bm25_index=None):
+    """Run the full debate for one question and return its record (see module docstring).
+
+    ``bm25_index`` is the dataset-level BM25 reference index (``utils.data_utils.build_bm25_index``)
+    used by the evidence governor; without it the pool-local statistics are used.
+    """
     t0 = time.time()
     question = data["question"]
     answer = data["answer"]
@@ -141,7 +167,8 @@ def run_debate(data, debaters, judge, summarizer, prompt, cfg, index=None):
     elif cfg.legacy:
         pool, pool_meta = legacy_pool(wiki, google, w, g)
     else:
-        pool, pool_meta = build_pool(question, wiki, google, w=w, g=g, dedup=cfg.dedup, rrf=cfg.rrf, rrf_k=cfg.rrf_k)
+        pool, pool_meta = build_pool(question, wiki, google, w=w, g=g, bm25_index=bm25_index,
+                                     dedup=cfg.dedup, rrf=cfg.rrf, rrf_k=cfg.rrf_k)
 
     record = {"index": index, "question": question, "answer": answer, "llm_answers": [], "final_answer": None,
               "Summary": "", "stop_round": None, "status": "completed", "error": None}
@@ -164,9 +191,14 @@ def run_debate(data, debaters, judge, summarizer, prompt, cfg, index=None):
         "failure": None,
     }
 
+    system_of = {"evidence": prompt.choose_evidence_system_prompt, "debater": prompt.debater_system_prompt,
+                 "judge": prompt.judge_system_prompt, "summariser": prompt.summary_system_prompt,
+                 "verifier": prompt.summary_system_prompt}
+
     def account(stage, user_prompt, reply, usage=None):
         trace["calls"][stage] += 1
-        trace["tokens"]["prompt"] += count_tokens(user_prompt or "")
+        if user_prompt:   # input size of the call: system message + user message
+            trace["tokens"]["prompt"] += _system_tokens(system_of[stage]) + count_tokens(user_prompt)
         trace["tokens"]["completion"] += count_tokens(reply or "")
         if usage:
             trace["server_usage"]["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
@@ -247,6 +279,9 @@ def run_debate(data, debaters, judge, summarizer, prompt, cfg, index=None):
             record[round_key]["Agent_{}".format(num)] = reply
             agent_trace = dict(sel["parse"] or _EMPTY_PARSE)
             agent_trace.update({"answer": extract_final_answer(reply), "attempts": res.attempts})
+            intended = (sel.get("meta") or {}).get("intended_ids")
+            if intended is not None:   # scripted agents only: the selection the reply means to make
+                agent_trace["intended_ids"] = list(intended)
             round_trace["agents"][agent.agent_name] = agent_trace
 
         if failed:
@@ -304,7 +339,8 @@ def run_debate(data, debaters, judge, summarizer, prompt, cfg, index=None):
         trace["cited_valid_ids"] = valid
         trace["cited_invalid_ids"] = [c for c in cited if c not in valid]
         trace["cite_none_flag"] = none_flag
-        if cfg.task_type == "classification":
+        # A verdict (FEVER label, yes / no) is not an answer span: the lexical check does not apply.
+        if cfg.task_type == "classification" or is_verdict_answer(final_answer):
             status = "not_applicable"
         else:
             status = support_check(final_answer, valid, pool)
@@ -312,7 +348,7 @@ def run_debate(data, debaters, judge, summarizer, prompt, cfg, index=None):
         trace["support_status"] = status
 
         # --- bounded verification (Algorithm 4) ----------------------------------
-        if cfg.verify and cfg.task_type == "extractive" and status != "supported":
+        if cfg.verify and status not in ("supported", "not_applicable"):
             vres = verify_answer(summarizer, question=question, debate=debate_text,
                                  evidence=format_citable_evidence(pool, union_selected), prompt=prompt)
             account("verifier", vres.get("prompt"), vres.get("reply"), vres.get("usage"))
@@ -323,7 +359,8 @@ def run_debate(data, debaters, judge, summarizer, prompt, cfg, index=None):
                 v_answer = extract_final_answer(vres["reply"])
                 v_cited, v_none = parse_citations(vres["reply"])
                 v_valid = [c for c in v_cited if 0 <= c < len(pool) and c in union_selected]
-                v_status = support_check(v_answer, v_valid, pool)
+                v_status = ("not_applicable" if is_verdict_answer(v_answer)
+                            else support_check(v_answer, v_valid, pool))
                 ver.update(answer=v_answer, cited_ids=v_cited, cited_valid_ids=v_valid, support_status=v_status,
                            abstained=(normalize_text(v_answer) == "unsupported") or (v_none and not v_valid))
                 if v_status == "supported":

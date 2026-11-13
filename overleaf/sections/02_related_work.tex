@@ -1,0 +1,50 @@
+\section{Related work}
+\label{sec:related_work}
+
+Five lines of research meet in MADKE-X: debate among language-model agents, retrieval-augmented generation, the ordering of retrieved evidence, the attribution of answers to sources, and evaluation practice. They are reviewed in turn, and the last subsection states where MADKE-X stands among them.
+
+\subsection{Multi-agent debate and collaboration}
+Du et al.~\cite{du2024debate} showed that several instances of a language model that propose answers, read the answers of the others and revise their own over a few rounds reach higher factual accuracy and better arithmetic reasoning than one instance alone. Liang et al.~\cite{liang2024divergent} traced a weakness of self-reflection to what they call degeneration of thought: once a model has committed to an answer, reflecting on it rarely changes its mind. Their remedy is a debate between an affirmative and a negative side, with a judge who ends it. ChatEval \cite{chan2024chateval} used agents with different personas to evaluate generated text and came closer to human judgements than single-agent evaluators did. A more sober picture comes from Smit et al.~\cite{smit2024mad}, who compared debate protocols under matched budgets. In their experiments the benefit of debate depends strongly on the number of agents, the number of rounds and the level of agreement that is enforced, and a tuned single model with self-consistency \cite{wang2023sc} is often as good.
+
+Refinement methods for a single agent rest on the same idea of a second look. Self-Refine \cite{madaan2023selfrefine} has one model criticise and rewrite its own output, Reflexion \cite{shinn2023reflexion} keeps verbal feedback from earlier attempts in memory, and ReAct \cite{yao2023react} alternates reasoning steps with actions such as search queries. All of these methods pass text from one step to the next, and all of them depend on that text being the right one. When a step receives the wrong text, or a reply is parsed wrongly, the second look is applied to the wrong material. MADKE belongs to this family and adds retrieved evidence to the debate. The findings of Section~\ref{sec:baseline} on its public implementation are failures of exactly these text interfaces.
+
+\subsection{Retrieval-augmented generation}
+Retrieval-augmented generation (RAG) conditions a generator on passages retrieved from an external corpus. Lewis et al.~\cite{lewis2020rag} combined a dense passage retriever \cite{karpukhin2020dpr} with a sequence-to-sequence generator and trained both together. REALM \cite{guu2020realm} brought retrieval into the pre-training of the language model, and Fusion-in-Decoder \cite{izacard2021fid} showed that a reader can combine many passages when each one is encoded separately. With instruction-following models, retrieval is mostly used without training: the retrieved passages are placed in the prompt. The survey of Gao et al.~\cite{gao2023ragsurvey} sorts such systems into naive, advanced and modular RAG and names the selection, ordering and compression of passages as the main design choices of the advanced kind. For multi-hop questions, IRCoT \cite{trivedi2023ircot} alternates retrieval with chain-of-thought steps, and Self-RAG \cite{asai2024selfrag} trains a model to decide when to retrieve and to judge whether a retrieved passage supports its output.
+
+MADKE uses retrieval in the prompt-based way. Passages were retrieved once per question from Wikipedia and from Google search and are shipped with the benchmark files, and the agents decide which of them to read. What the agents can learn therefore depends on what the pool contains and, as the next subsection argues, on the order in which the pool is listed.
+
+\subsection{Ordering of retrieved evidence}
+Liu et al.~\cite{liu2024lost} found that language models use long contexts unevenly: accuracy is highest when the relevant passage stands at the beginning or the end of the context and falls when it stands in the middle. In MADKE an agent sees the whole pool when it selects passages, so the position of an answer-bearing passage in the listing may decide whether the passage is selected. Two classical tools order candidates without labels. BM25 \cite{robertson2009bm25} scores a passage by the frequency of the query terms in it, weighted by their rarity in the collection and normalised by the length of the passage. Reciprocal rank fusion (RRF) \cite{cormack2009rrf} combines several rankings by summing, for each item, the reciprocal of a constant plus its rank in each list. RRF needs no training data, and Cormack et al.\ found it better than the individual rankings and than learned fusion methods. MADKE-X fuses the retrieval rank shipped with the data with a BM25 rank computed from the question, so the order of the pool uses neither a gold answer nor a model.
+
+\subsection{Attribution, hallucination and verification}
+A generated answer can be wrong although the correct evidence is in the context \cite{ji2023hallucination}. ALCE \cite{gao2023alce} is a benchmark in which a model must cite the passages that support each of its statements, scored by citation recall and precision. Rashkin et al.~\cite{rashkin2023attribution} define attribution to identified sources as a property that humans can judge and models can approximate. FActScore \cite{min2023factscore} splits a long answer into atomic facts and checks each against a knowledge source, and SelfCheckGPT \cite{manakul2023selfcheckgpt} detects unsupported statements by sampling several answers and measuring their agreement, without external evidence. Jacovi and Goldberg \cite{jacovi2020faithful} add a conceptual point: an explanation is faithful only if it reflects the process that produced the decision.
+
+MADKE-X takes a narrow position here. Its decision trace records what the pipeline did, which makes the trace faithful to the process by construction, and its support check is a lexical test of whether the answer string occurs in a cited passage. The test is cheap and deterministic. It detects a missing answer string and nothing more; in particular it does not establish entailment. A learned attribution model could take its place without any other change to the method.
+
+\subsection{Reproducible and statistically sound evaluation}
+Pineau et al.~\cite{pineau2021reproducibility} describe a reproducibility checklist for machine-learning research that asks, among other items, for released code, exact data versions and the number of evaluation runs. Dror et al.~\cite{dror2018hitchhiker} review significance testing in natural language processing and recommend paired tests whenever two systems answer the same items. For binary outcomes on the same questions, the exact McNemar test \cite{mcnemar1947} compares the discordant pairs. The bootstrap \cite{efron1979bootstrap} gives confidence intervals without distributional assumptions, power analysis \cite{cohen1988power} gives the sample size needed to detect a given difference, and the Holm procedure \cite{holm1979} controls the family-wise error rate when several datasets are tested. Exact match (EM) and token-level F1 for extractive question answering follow the SQuAD definitions \cite{rajpurkar2016squad}. A language model used as a judge of correctness shows position and verbosity biases, so its agreement with human judgement has to be checked before its scores are trusted \cite{zheng2023judge}. The protocol of this study follows these recommendations and scores answers with EM and F1, which need no model as judge.
+
+\subsection{Position of MADKE-X}
+Table~\ref{tab:positioning} compares representative methods by what they provide. Debate methods without retrieval rely on what the model already knows. Retrieval methods with one model have no second agent that could object. ALCE adds citations but no debate. Among the methods in the table only MADKE combines debate with evidence selection by each agent. MADKE-X adds citations at the level of the answer, a bounded verification step and explicit handling of failed calls, and it leaves the debate as it is.
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Capabilities of representative methods (\checkmark{} = provided by the method as published).}
+\label{tab:positioning}
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Method & \shortstack{Multiple\\agents} & \shortstack{External\\evidence} & \shortstack{Per-agent\\selection} & \shortstack{Answer\\citations} & \shortstack{Bounded\\verification} & \shortstack{Failure\\handling} \\
+\midrule
+Multi-agent debate \cite{du2024debate} & \checkmark & & & & & \\
+Debate with judge \cite{liang2024divergent} & \checkmark & & & & & \\
+RAG \cite{lewis2020rag} & & \checkmark & & & & \\
+ALCE \cite{gao2023alce} & & \checkmark & & \checkmark & & \\
+MADKE \cite{wang2025madke} & \checkmark & \checkmark & \checkmark & & & \\
+MADKE-X (this study) & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}

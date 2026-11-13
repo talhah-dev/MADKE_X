@@ -1,0 +1,4 @@
+\section{The MADKE baseline}
+\label{sec:baseline}
+
+Given a question $q$ and a pool $E$ of retrieved passages, $A$ debaters run for at most $R$ rounds. In each round every debater selects up to three passages (one call), answers (one call), and a judge decides whether the answers agree (one call); on agreement or in the last round a summariser writes the final answer. With the published setting $A{=}2$, $R{=}3$ and temperature 0.5 this is at most $R(2A{+}1){+}1 = 16$ calls per question. MADKE is evaluated on TriviaQA \cite{joshi2017triviaqa}, NQ \cite{kwiatkowski2019nq}, HotpotQA \cite{yang2018hotpotqa}, 2WikiMultihopQA \cite{ho2020twowiki}, FEVER \cite{thorne2018fever} and a medical multiple-choice set, using 500 sampled questions per set.

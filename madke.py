@@ -23,6 +23,7 @@ from debate import DebateConfig, build_agents, run_debate, select_prompt
 from parser import get_args
 from utils.data_utils import (
     DATA_FILES,
+    build_bm25_index,
     dataset_path,
     print_args,
     read_json_data,
@@ -74,9 +75,12 @@ def main():
 
     debaters, judge, summarizer = build_agents(args, args.agent_num, args.mode, args.dataset_name)
 
+    # dataset-level BM25 reference statistics for the evidence governor (Algorithm 2, index B)
+    bm25_index = None if cfg.legacy else build_bm25_index(test_dataset, cfg.wiki_k, cfg.google_k)
+
     all_dialog_process = []
     for i in tqdm(indices, total=len(indices)):
-        record = run_debate(test_dataset[i], debaters, judge, summarizer, prompt, cfg, index=i)
+        record = run_debate(test_dataset[i], debaters, judge, summarizer, prompt, cfg, index=i, bm25_index=bm25_index)
         all_dialog_process.append(record)
         if record["status"] == "failed":
             print("Question {} FAILED at stage {}: {}".format(i, record["error"]["stage"], record["error"]["error"]))

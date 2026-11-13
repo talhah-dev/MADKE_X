@@ -1,51 +1,94 @@
 {
     "n": 500,
     "task_type": "extractive",
-    "avg_legacy_candidates": 14.992,
-    "avg_x_candidates": 9.992,
+    "tokenizer": "tiktoken:cl100k_base",
+    "passages": {
+        "original": 14.992,
+        "specified": 9.992,
+        "x": 9.968
+    },
+    "listing_tokens": {
+        "original": 1669.138,
+        "specified": 932.194,
+        "x": 930.098,
+        "reduction_pct": 44.27674644037821
+    },
     "duplicates_removed": 12,
     "questions_with_duplicates": 11,
-    "avg_x_pool_size": 9.968,
-    "avg_legacy_tokens": 1461.652,
-    "avg_x_nodedup_tokens": 807.232,
-    "avg_x_tokens": 805.374,
-    "token_reduction_pct": 44.89974357781469,
-    "build_time_sec": 6.774249800000689,
-    "build_time_ms_per_q": 13.548499600001378,
-    "peak_memory_kb": 2328.1474609375,
-    "tokenizer": "regex-approximation",
+    "cost": {
+        "index_build_ms": 196.6762000010931,
+        "index_passages": 4996,
+        "x_build_ms_per_q": 0.6366247999976622,
+        "original_build_ms_per_q": 0.0003766000008909032,
+        "x_peak_memory_kb": 2367.6025390625,
+        "original_peak_memory_kb": 85.921875
+    },
+    "n_span": 500,
+    "n_verdict_gold": 0,
+    "coverage_pct": {
+        "original": 86.6,
+        "specified": 83.6,
+        "x": 83.6
+    },
     "ordering": {
-        "source_order": {
+        "original": {
             "n": 500,
-            "cov@1": 0.486,
-            "cov@3": 0.61,
-            "cov@5": 0.684,
-            "mrr": 0.5810674603174604,
-            "any_hit": 0.844
+            "cov@1": 0.472,
+            "cov@3": 0.604,
+            "cov@5": 0.676,
+            "mrr": 0.5654212287712288,
+            "any_hit": 0.866
         },
-        "bm25_only": {
+        "specified": {
             "n": 500,
-            "cov@1": 0.334,
-            "cov@3": 0.62,
-            "cov@5": 0.73,
-            "mrr": 0.4970079365079365,
-            "any_hit": 0.844
+            "cov@1": 0.472,
+            "cov@3": 0.604,
+            "cov@5": 0.676,
+            "mrr": 0.5702666666666667,
+            "any_hit": 0.836
+        },
+        "interleaved": {
+            "n": 500,
+            "cov@1": 0.472,
+            "cov@3": 0.694,
+            "cov@5": 0.762,
+            "mrr": 0.5996753968253967,
+            "any_hit": 0.836
+        },
+        "bm25": {
+            "n": 500,
+            "cov@1": 0.354,
+            "cov@3": 0.632,
+            "cov@5": 0.738,
+            "mrr": 0.512186507936508,
+            "any_hit": 0.836
         },
         "rrf": {
             "n": 500,
-            "cov@1": 0.406,
-            "cov@3": 0.648,
-            "cov@5": 0.758,
-            "mrr": 0.5494190476190477,
-            "any_hit": 0.844
+            "cov@1": 0.45,
+            "cov@3": 0.664,
+            "cov@5": 0.754,
+            "mrr": 0.5781563492063492,
+            "any_hit": 0.836
         },
-        "legacy_15": {
+        "random": {
             "n": 500,
-            "cov@1": 0.486,
-            "cov@3": 0.61,
-            "cov@5": 0.684,
-            "mrr": 0.5762974192474193,
-            "any_hit": 0.876
+            "cov@1": 0.30121111111111065,
+            "cov@3": 0.5730095238095252,
+            "cov@5": 0.6967619047619051,
+            "mrr": 0.4669249855127233,
+            "any_hit": 0.836
         }
+    },
+    "paired_cov3": {
+        "n": 500,
+        "original_only": 45,
+        "rrf_only": 75,
+        "gain_pts": 6.0,
+        "ci95": [
+            1.6,
+            10.4
+        ],
+        "p_value": 0.007846593122439764
     }
 }

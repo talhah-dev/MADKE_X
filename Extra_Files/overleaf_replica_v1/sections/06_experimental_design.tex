@@ -1,0 +1,31 @@
+\section{Experimental design}
+\label{sec:design}
+
+The design reproduces that of MADKE so that the comparison is like for like (Table~\ref{tab:design}).
+
+\paragraph{Component ablation} the steps are MADKE, then adding in turn the interface layer, the paper-sized pool, de-duplication, RRF ordering, citations and verification; each step is a separate run so that its effect is attributable.
+
+\paragraph{Decision rule} The interface repairs are adopted if F1 does not drop beyond paired-bootstrap noise on any dataset; RRF and verification are adopted only if the pooled paired test is significant after Holm correction. A difference of 4.4 points near 50\% accuracy needs about 1,000 paired questions at an assumed agreement of 0.5 (Figure~\ref{fig:power}), so per-dataset results at $n{=}500$ are exploratory and the pooled analysis is primary.
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Evaluation design: what MADKE did and what we do.}
+\label{tab:design}
+\begin{tabular}{p{0.14\textwidth}p{0.34\textwidth}p{0.40\textwidth}}
+\toprule
+ & MADKE (published) & This study \\
+\midrule
+Datasets & TriviaQA, NQ, HotpotQA, 2WikiMQA, FEVER, MMLU-Med; 500 each (595 MMLU-Med) & Same shipped files, unaltered, all 500 questions (the released code processes 441); MMLU-Med not shipped \\
+Baselines & SP, CoT, SC, RAG, MAD & Same five, plus MADKE re-run and MADKE-X \\
+Backbones & GPT-3.5-Turbo, Qwen1.5-32B/72B-Chat; GPT-4-Turbo reference & Same \\
+Metrics & F1, GPT-4 score, EM (FEVER), Cons, Co2 & Same, with Cons/Co2 computed by the repaired metric; plus support status, failure count, tokens, time \\
+Setting & Two agents, $\le$3 rounds, temperature 0.5, top-5 Wikipedia, 5 Google, $\le$3 items per round & Identical \\
+Analyses & Knowledge-source ablation, selector ablation, model scale, agents/rounds, token cost, case study & Same, plus component ablation of MADKE-X \\
+Statistics & Point estimates & Paired exact McNemar, paired bootstrap, Holm correction, pre-specified pooled analysis \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Implementation and environment}
+The code is Python \texttt{3.13.16} with the standard library for the debate loop and parsers; analyses use NumPy 2.5.3, SciPy 1.18.1 and Matplotlib 3.11.2; the manuscript is built with pdfTeX (TeX Live 2023). All offline experiments ran on a Linux 6.18 virtual machine with an Intel Xeon processor at 2.10\,GHz (two cores) and 8\,GB of memory. No GPU, LLM or search API was used. The scripted agents emit replies in the formats the prompts request, with deliberate format variation (lower-case flags, IDs in one bracket, quoted verdicts), so that each repaired parser is exercised against a known intended result.

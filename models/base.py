@@ -17,6 +17,7 @@ class AgentResult:
     attempts: int = 1
     latency: float = 0.0
     usage: dict = field(default_factory=dict)   # prompt_tokens / completion_tokens when reported
+    meta: dict = field(default_factory=dict)    # optional annotations of the agent (scripted agents: intended selection)
 
     def to_dict(self):
         return asdict(self)

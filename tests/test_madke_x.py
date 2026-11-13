@@ -12,9 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from debate import legacy_config, madke_x_config, run_debate, select_prompt  # noqa: E402
 from models.base import AgentResult  # noqa: E402
 from models.scripted_agent import ScriptedAgent  # noqa: E402
-from utils.data_utils import BM25, build_pool, legacy_pool, tokenize  # noqa: E402
+from utils.data_utils import BM25, build_bm25_index, build_pool, legacy_pool, tokenize  # noqa: E402
 from utils.evaluation_utils import (  # noqa: E402
+    contains_phrase,
     extract_final_answer,
+    is_verdict_answer,
     parse_citations,
     parse_evidence_ids,
     parse_evidence_ids_legacy,
@@ -23,10 +25,19 @@ from utils.evaluation_utils import (  # noqa: E402
     support_check,
 )
 from utils.metrics_calculator import (  # noqa: E402
+    expected_random_coverage,
+    expected_random_reciprocal_rank,
+    has_span_answer,
+    mcnemar_sample_size,
+    passage_contains_any,
+    two_proportion_power,
+    two_proportion_sample_size,
     bootstrap_ci,
     compute_co2,
+    compute_co2_original,
     compute_cons,
     compute_cons_original,
+    compute_late_agreement,
     compute_em_f1,
     mcnemar_exact,
     paired_mcnemar,
@@ -35,13 +46,28 @@ from utils.prompt_utils import summary_final_answer  # noqa: E402
 
 
 class TestAlgorithm1(unittest.TestCase):
-    def test_order_dedup_cap_bounds(self):
+    def test_final_statement_dedup_cap_bounds(self):
+        # the selection is the final statement: the last three distinct ids, in written order
         p = parse_evidence_ids("[2] then [0], [7] and [2] again, [12], [1] [5]", pool_size=10, cap=3)
-        self.assertEqual(p.ids, [2, 0, 7])
+        self.assertEqual(p.ids, [2, 1, 5])
         self.assertFalse(p.not_found)
-        self.assertEqual(p.dropped, [1, 5])
+        self.assertEqual(p.dropped, [0, 7])
         self.assertEqual(p.out_of_range, [12])
         self.assertEqual(p.ignored, [])
+        # passages discussed first, selection last
+        p = parse_evidence_ids("[1] and [5] are off topic. Helpful: [2] [0] [7]", 10)
+        self.assertEqual((p.ids, p.dropped), ([2, 0, 7], [1, 5]))
+        # an id that is repeated keeps the position of its last occurrence
+        p = parse_evidence_ids("[2] is the key passage. Selection: [2] [0] [7]", 10)
+        self.assertEqual((p.ids, p.dropped), ([2, 0, 7], []))
+        self.assertEqual(parse_evidence_ids("[4] [6]", 10, cap=0).dropped, [4, 6])
+
+    def test_same_passages_as_the_release_in_written_order(self):
+        # whenever the released parser can read the reply, the delivered SET is identical
+        for reply in ("[2], [0] and [7]", "[2] [0] [7] [1] [5]", "[1] and [5] are off topic. Helpful: [2] [0] [7]",
+                      "[2] is the key passage. Selection: [2] [0] [7]", "[2] [0] [12]", "[4]", "no brackets"):
+            new, old = parse_evidence_ids(reply, 10).ids, parse_evidence_ids_legacy(reply, 10).ids
+            self.assertEqual(new, list(reversed(old)), reply)
 
     def test_boundary_n_equals_pool_size(self):
         p = parse_evidence_ids("[9] [10]", pool_size=10)
@@ -94,6 +120,24 @@ class TestAlgorithm3(unittest.TestCase):
         pool = [{"contents": "Sir Henry Campbell-Bannerman became Prime Minister."}]
         self.assertEqual(support_check("Campbell Bannerman", [0], pool), "supported")
 
+    def test_whole_word_matching(self):
+        pool = [{"contents": "A comparison of the two towns was published in 1957."}]
+        self.assertEqual(support_check("Paris", [0], pool), "cited_but_answer_not_found")   # not inside "comparison"
+        self.assertEqual(support_check("5", [0], pool), "cited_but_answer_not_found")       # not inside "1957"
+        self.assertEqual(support_check("1957", [0], pool), "supported")
+        self.assertEqual(support_check("two towns", [0], pool), "supported")
+        self.assertTrue(contains_phrase("two towns", "a comparison of the two towns"))
+        self.assertFalse(contains_phrase("", "anything"))
+
+    def test_verdict_answers(self):
+        for a in ("yes", "No.", "SUPPORTS", "Refutes", "NOT ENOUGH INFO"):
+            self.assertTrue(is_verdict_answer(a), a)
+        self.assertFalse(is_verdict_answer("Chicago"))
+        self.assertFalse(has_span_answer(["yes"]))
+        self.assertTrue(has_span_answer(["Chicago", "City of Chicago"]))
+        self.assertTrue(passage_contains_any("Founded in Chicago, Illinois.", ["chicago"]))
+        self.assertFalse(passage_contains_any("A comparison of towns.", ["Paris"]))
+
 
 class TestAlgorithm2(unittest.TestCase):
     def setUp(self):
@@ -136,6 +180,24 @@ class TestAlgorithm2(unittest.TestCase):
         s = idx.score(tokenize("France"))
         self.assertGreater(s[0], s[1])
 
+    def test_dataset_level_index(self):
+        dataset = [{"question": "q1", "wiki_retrieval": self.wiki, "google_retrieval": self.google},
+                   {"question": "q2", "wiki_retrieval": [{"contents": "The capital of Peru is Lima."}] * 7,
+                    "google_retrieval": [{"contents": "Capital cities of the world."}]}]
+        idx = build_bm25_index(dataset, w=5, g=5)
+        self.assertEqual(idx.n_docs, 5 + 3 + 5 + 1)                      # first w + first g passages of every question
+        with self.assertRaises(ValueError):
+            idx.score(tokenize("capital"))                               # reference index keeps statistics only
+        # "capital" occurs in most reference passages, "seine" in one: the rare term must weigh more
+        self.assertGreater(idx.idf["seine"], idx.idf["capital"])
+        pool, meta = build_pool("Which capital lies on the Seine?", self.wiki, self.google, bm25_index=idx)
+        self.assertEqual(meta["bm25_reference"], {"scope": "dataset", "n_passages": 14})
+        seine = [p for p in pool if "Seine" in p["contents"]][0]
+        self.assertEqual(seine["bm25_rank"], 1)                          # best lexical match
+        self.assertLessEqual(seine["index"], 1)                          # fused with source rank: first or second
+        _, meta_local = build_pool("Which capital lies on the Seine?", self.wiki, self.google)
+        self.assertEqual(meta_local["bm25_reference"]["scope"], "pool")
+
 
 def _rec(idx, verdicts, status="completed", answer="x", gold=("x",), stop_round=None):
     return {"index": idx, "status": status, "final_answer": answer if status == "completed" else None, "answer": list(gold),
@@ -148,9 +210,24 @@ class TestMetrics(unittest.TestCase):
         recs = [_rec(0, ["yes"]), _rec(1, ["no", "yes"]), _rec(2, ["no", "no", "yes"]), _rec(3, ["no", "no", "no"]),
                 _rec(4, ["no"], status="failed")]
         self.assertAlmostEqual(compute_cons(recs)["cons"], 3 / 4)
-        self.assertAlmostEqual(compute_co2(recs)["co2"], 2 / 4)
-        # original formula never counts final-round agreement (dict membership bug)
-        self.assertAlmostEqual(compute_cons_original(recs[:4], max_round=3)["cons_original"], 2 / 4)
+        self.assertAlmostEqual(compute_co2(recs)["co2"], 3 / 4)               # all three consistent answers are correct
+        self.assertAlmostEqual(compute_late_agreement(recs)["late_agreement"], 2 / 4)
+        # the formula of the release never counts an agreement of the final round (dict membership bug)
+        self.assertAlmostEqual(compute_cons_original(recs, max_round=3)["cons_original"], 2 / 4)
+        self.assertAlmostEqual(compute_co2_original(recs, max_round=3)["co2_original"], 2 / 4)
+
+    def test_co2_is_consistent_and_correct(self):
+        recs = [_rec(0, ["yes"]), _rec(1, ["no", "yes"], answer="wrong"), _rec(2, ["no", "no", "yes"]),
+                _rec(3, ["no", "no", "no"])]
+        self.assertAlmostEqual(compute_cons(recs)["cons"], 3 / 4)
+        self.assertAlmostEqual(compute_co2(recs)["co2"], 2 / 4)               # question 1 is consistent but wrong
+        self.assertAlmostEqual(compute_co2_original(recs)["co2_original"], 1 / 4)
+        # robust reading of an unpatched record: the pipeline missed the agreement, the judge reply states it
+        missed = _rec(4, ["no", "no", "no"])
+        missed["trace"]["rounds"] = [{"judge_verdict": "no", "judge_verdict_robust": v} for v in ("no", "yes", "yes")]
+        self.assertAlmostEqual(compute_cons([missed])["cons"], 0.0)
+        self.assertAlmostEqual(compute_cons([missed], robust=True)["cons"], 1.0)
+        self.assertAlmostEqual(compute_co2([missed], robust=True)["co2"], 1.0)
 
     def test_em_f1_excludes_failed(self):
         recs = [_rec(0, ["yes"], answer="x"), _rec(1, ["yes"], answer="y"), _rec(2, ["yes"], status="failed")]
@@ -197,6 +274,7 @@ class TestDebateLoop(unittest.TestCase):
             for a in rt["agents"].values():
                 self.assertLessEqual(len(a["selected_ids"]), 3)
                 self.assertTrue(all(0 <= i < 4 for i in a["selected_ids"]))
+                self.assertEqual(a["selected_ids"], a["intended_ids"])   # delivered = what the script meant to select
         if "yes" in tr["judge_verdicts"]:
             self.assertEqual(tr["judge_verdicts"].index("yes"), len(tr["judge_verdicts"]) - 1)
 
@@ -226,6 +304,98 @@ class TestDebateLoop(unittest.TestCase):
         self.assertIn("Question: Q?", res["reply"])
         with self.assertRaises(TypeError):
             summary_final_answer(Echo(), "Q?", "[Agent 0] a\n", select_prompt("nq"))  # positional use is rejected
+
+
+class TestAnalysisHelpers(unittest.TestCase):
+    def test_random_order_expectations(self):
+        self.assertAlmostEqual(expected_random_coverage(10, 2, 3), 1 - 56 / 120)
+        self.assertEqual(expected_random_coverage(10, 0, 3), 0.0)
+        self.assertEqual(expected_random_coverage(3, 1, 5), 1.0)
+        self.assertAlmostEqual(expected_random_reciprocal_rank(6, 2), 0.58)       # checked by enumeration
+        self.assertAlmostEqual(expected_random_reciprocal_rank(4, 4), 1.0)
+
+    def test_power_functions(self):
+        n = two_proportion_sample_size(0.736, 0.648)
+        self.assertTrue(425 < n < 440)
+        self.assertAlmostEqual(two_proportion_power(0.736, 0.648, n), 0.8, places=2)
+        self.assertTrue(1000 < mcnemar_sample_size(0.044, 0.25) < 1025)
+
+    def test_interface_format_tables(self):
+        from run_experiments import interface_format_tables
+        fmt = interface_format_tables()
+        ev = {e["format"]: e for e in fmt["evidence"]}
+        self.assertEqual(ev["separate brackets"]["x_delivered"], [2, 0, 7])
+        self.assertEqual(ev["separate brackets"]["released_delivered"], [7, 0, 2])
+        self.assertEqual(ev["list in one bracket"]["released_delivered"], [])
+        self.assertEqual(ev["list in one bracket"]["x_delivered"], [2, 0, 7])
+        self.assertEqual(ev["passages discussed first, selection last"]["x_delivered"], [2, 0, 7])
+        self.assertEqual(ev["passages discussed first, selection last"]["x_dropped"], [1, 5])
+        self.assertEqual(ev["more than three listed"]["released_delivered"], [5, 1, 7])
+        self.assertEqual(ev["more than three listed"]["x_delivered"], [7, 1, 5])
+        self.assertEqual(ev["more than three listed"]["x_dropped"], [2, 0])
+        self.assertEqual(ev["identifier outside the pool"]["x_out_of_range"], [12])
+        self.assertTrue(ev["lower-case not-found marker"]["x_not_found"])
+        self.assertEqual(ev["lower-case not-found marker"]["released_delivered"], [3])
+        for v in fmt["verdict"]:
+            self.assertTrue(v["x_correct"], v)
+        self.assertEqual(sum(1 for v in fmt["verdict"] if v["released_correct"]), 1)
+
+
+class TestVerdictAnswersAndResume(unittest.TestCase):
+    data = {"question": "Are both rivers in Europe?", "answer": ["yes"],
+            "wiki_retrieval": [{"id": "1", "contents": "The Rhine is a river in Europe."},
+                               {"id": "2", "contents": "The Danube is a river in Europe."}],
+            "google_retrieval": [{"id": 0, "contents": "Both the Rhine and the Danube flow through Europe."}]}
+
+    class Fixed:
+        """Agent that always selects passage 0 and answers / summarises with a fixed verdict."""
+
+        def __init__(self, name):
+            self.agent_name = name
+            self.calls = []
+
+        def __call__(self, messages):
+            user = messages[-1]["content"].lower()
+            self.calls.append(user[:40])
+            if "select evidence from the evidence pool" in user:
+                return AgentResult(ok=True, text="[0]")
+            if "evaluate the consistency" in user:
+                return AgentResult(ok=True, text="[Yes]")
+            if "verification step" in user:
+                raise AssertionError("verification must not be called for a verdict answer")
+            return AgentResult(ok=True, text="Both are in Europe. Therefore, the answer is [yes]. {E0}")
+
+    def test_verdict_answer_is_not_applicable_and_not_verified(self):
+        mk = self.Fixed
+        rec = run_debate(self.data, [mk("Agent_0"), mk("Agent_1")], mk("Judge"), mk("Summarizer"),
+                         select_prompt("hotpotqa"), madke_x_config("hotpotqa"), index=0)
+        self.assertEqual(rec["status"], "completed")
+        self.assertEqual(rec["final_answer"], "yes")
+        self.assertEqual(rec["trace"]["support_status"], "not_applicable")
+        self.assertFalse(rec["trace"]["verification"]["attempted"])
+        self.assertEqual(rec["trace"]["calls"]["verifier"], 0)
+        self.assertEqual(rec["trace"]["config"]["code_version"], __import__("debate").CODE_VERSION)
+
+    def test_checkpoints_of_another_version_are_not_resumed(self):
+        import json
+        import tempfile
+        from run_experiments import run_records
+        mk = self.Fixed
+        cfg = madke_x_config("hotpotqa")
+        with tempfile.TemporaryDirectory() as tmp:
+            ckpt = os.path.join(tmp, "madke_x.jsonl")
+            stale = {"index": 0, "status": "completed", "final_answer": "old", "trace": {"config": {"code_version": "0.0.1"}}}
+            with open(ckpt, "w", encoding="utf-8") as fw:
+                fw.write(json.dumps(stale) + "\n")
+            agents = ([mk("Agent_0"), mk("Agent_1")], mk("Judge"), mk("Summarizer"))
+            recs = run_records([self.data], [0], cfg, select_prompt("hotpotqa"), agents, checkpoint=ckpt)
+            self.assertEqual(len(recs), 1)
+            self.assertEqual(recs[0]["final_answer"], "yes")                      # re-run, not resumed
+            self.assertTrue(any(".stale-" in f for f in os.listdir(tmp)))
+            recs2 = run_records([self.data], [0], cfg, select_prompt("hotpotqa"), agents, checkpoint=ckpt)
+            self.assertEqual(recs2[0]["final_answer"], "yes")                     # now resumed from the new checkpoint
+            with open(ckpt, encoding="utf-8") as fr:
+                self.assertEqual(len(fr.readlines()), 1)
 
 
 if __name__ == "__main__":

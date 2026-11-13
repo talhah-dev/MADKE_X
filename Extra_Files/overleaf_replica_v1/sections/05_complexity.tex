@@ -1,0 +1,22 @@
+\section{Complexity analysis}
+\label{sec:complexity}
+
+Let $A$ be the number of agents, $R$ the maximum number of rounds, $m$ the pool size, $L$ the mean passage length (words) and $N$ the number of passages in the BM25 reference set. Table~\ref{tab:complexity} compares the two systems analytically. The dominant cost of both systems is the LLM calls, whose number is unchanged except for the optional verification call. MADKE-X reduces the tokens in each selection call, and the number of such calls is $AR$ at most (6 at $A{=}2$, $R{=}3$).
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Analytic cost of MADKE and MADKE-X per question.}
+\label{tab:complexity}
+\begin{tabular}{p{0.25\textwidth}p{0.29\textwidth}p{0.34\textwidth}}
+\toprule
+Quantity & MADKE & MADKE-X \\
+\midrule
+LLM calls (worst case) & $R(2A{+}1){+}1$ (16 at $A{=}2$, $R{=}3$) & $R(2A{+}1){+}1$, $+1$ with verification (17: $+6.25\%$) \\
+Evidence listing per selection call & $(10{+}5)\cdot L$ words & $\le (5{+}5)\cdot L$ words ($-33\%$ passages) \\
+Pool construction & $O(1)$ slice & $O(m\,|q|)$ after a one-time $O(NL)$ index \\
+Auxiliary memory & none & $O(V)$ BM25 index, $V=$ vocabulary \\
+Trace & none & $O(AR\cdot 3 + m)$ identifiers \\
+\bottomrule
+\end{tabular}
+\end{table}

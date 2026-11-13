@@ -1,0 +1,63 @@
+\section{The MADKE baseline}
+\label{sec:baseline}
+
+This section describes MADKE as published \cite{wang2025madke}, the data shipped with it, and what an inspection of its public implementation found. The method is described from the paper and the implementation from the released repository \cite{madke2025code} at commit \texttt{9cd57ca}. The data files of that repository are used unaltered throughout this study.
+
+\subsection{Debate procedure}
+Let $q$ be a question and $E$ a pool of retrieved passages. MADKE runs $A$ debating agents for at most $R$ rounds. In every round, each agent $i \in \{1,\dots,A\}$ makes two model calls. In the first, the agent sees the whole pool, each passage preceded by its index in square brackets, together with its own previous answer. It is asked to think step by step and to return the indices of up to three helpful passages in square brackets, or to add the marker \texttt{[No Found]} at the end of its reply when the pool holds nothing useful. In the second call, the agent sees the passages it selected, its own previous answer and the answers of the other agents, and writes a new answer that ends with the final answer in square brackets. When all agents have answered, a judge agent receives the question and the answers and replies with \texttt{[Yes]} if the answers agree and with \texttt{[No]} otherwise. When the judge replies \texttt{[Yes]}, or when the last round is reached, a summariser agent receives the question and the debate transcript and writes the final answer, again in square brackets.
+
+With $A$ agents and $R$ rounds, the number of model calls per question is at most
+\begin{equation}
+C_{\max} = R\,(2A + 1) + 1,
+\label{eq:calls}
+\end{equation}
+where $2A$ counts the selection and answer calls of the agents in one round, the term $1$ inside the parentheses counts the judge, and the final $1$ counts the summariser. The published setting is $A{=}2$, $R{=}3$ and temperature 0.5, which gives $C_{\max} = 16$. A debate that the judge ends before round $R$ uses fewer calls.
+
+\subsection{Benchmarks and evidence pools}
+MADKE is evaluated on TriviaQA \cite{joshi2017triviaqa}, Natural Questions (NQ) \cite{kwiatkowski2019nq}, HotpotQA \cite{yang2018hotpotqa}, 2WikiMultihopQA \cite{ho2020twowiki}, FEVER \cite{thorne2018fever} and a medical multiple-choice set, with 500 sampled questions per dataset and 595 for the medical set. The repository ships the first five as JSON files of 500 records each. A record holds the question, the gold answers, ten Wikipedia passages found by dense passage retrieval \cite{karpukhin2020dpr} and up to ten Google search snippets, each list in retrieval order. A Wikipedia passage has about 100 words and a Google snippet about 25. The medical set is not shipped and lies outside this study.
+
+FEVER differs from the other four datasets. Its gold labels are the verdicts \texttt{SUPPORTS}, \texttt{REFUTES} and \texttt{NOT ENOUGH INFO} (168, 166 and 166 claims) and not answer strings, so it is scored by exact match on the label, and measures that look for an answer string in a passage do not apply to it. The same holds for the \VNVerdictGoldHQA{} HotpotQA and \VNVerdictGoldWMQ{} 2WikiMultihopQA questions whose gold answer is ``yes'' or ``no''. They are left out of those measures, which then cover \VNSpanHQA{} and \VNSpanWMQ{} questions of the two datasets.
+
+The paper specifies a pool of the top five Wikipedia passages and five Google results per question. The shipped files bound what any method can reach on them. Even in the larger pool of ten Wikipedia and five Google passages, a passage that contains a gold answer exists for \VCoverRelTQA\% of the TriviaQA and \VCoverRelNQ\% of the NQ questions, but only for \VCoverRelHQA\% of the HotpotQA and \VCoverRelWMQ\% of the 2WikiMultihopQA questions (Table~\ref{tab:pool} in Section~\ref{sec:offline}). On the two multi-hop datasets no ordering or selection method can lift this ceiling.
+
+\subsection{Evaluation as published}
+The paper reports token-level F1 and a GPT-4 correctness score for the four question-answering datasets and exact match for FEVER. The backbones are GPT-3.5-Turbo, Qwen1.5-32B-Chat and Qwen1.5-72B-Chat, with GPT-4-Turbo as a single-agent reference. Two statistics describe the debate. The consistency ratio (Cons) is the share of questions on which the agents reached agreement, and the consistent-and-correct ratio (Co2) is the share on which they agreed on a correct answer. The difference between the two is the share of questions on which the agents agreed on a wrong answer. All results are point estimates; the paper gives no confidence intervals and no significance tests.
+
+\subsection{Inspection of the public implementation}
+\label{sec:audit}
+The repository was read at the commit named above, and each finding below refers to a statement of its code. The findings on the parsers, the summariser call, the consistency statistics and the handling of errors were also reproduced, by unit tests of the affected functions and by running the logic of the release again under scripted agents (Section~\ref{sec:design}). Table~\ref{tab:defects} lists the findings with their consequence and with the part of MADKE-X that addresses them. Findings C1--C8 concern the code of the debate and of its evaluation, P1--P3 the evidence pool, R1 the reporting and X1 the output.
+
+\begin{table}[!htbp]
+\centering
+\footnotesize
+\caption{Findings on the public MADKE release (commit \texttt{9cd57ca}) and the part of MADKE-X that addresses each.}
+\label{tab:defects}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{0.035\textwidth}>{\raggedright\arraybackslash}p{0.37\textwidth}>{\raggedright\arraybackslash}p{0.33\textwidth}>{\raggedright\arraybackslash}p{0.17\textwidth}}
+\toprule
+ID & Finding & Consequence & Addressed by \\
+\midrule
+C1 & The summariser is called with the debate transcript and the question in swapped positions. & The line ``Question:'' of every summariser prompt holds the replies of the agents. & Keyword binding (Sec.~\ref{sec:m_interface}) \\
+C2 & The test file is read with the slice \texttt{[59:]}. & An unmodified run answers 441 of the 500 questions. & Explicit index range \\
+C3 & The selection parser reads only brackets that hold one integer and one spelling of the not-found marker; passages are delivered in reverse order. & A list in one bracket delivers no passage; a marker in another spelling is ignored. & Eq.~\eqref{eq:parse} \\
+C4 & The judge counts as agreeing only if a bracket holds exactly \texttt{Yes}. & \texttt{[yes]}, \texttt{["Yes"]} and \texttt{[Yes.]} count as disagreement; a repeated agent answer \texttt{[Yes]} counts as agreement. & Eq.~\eqref{eq:verdict} \\
+C5 & The evaluation script looks for \texttt{[Yes]} among the keys of the dictionary that stores the last round. & Agreement reached in the last round is never counted in Cons. & Eq.~\eqref{eq:cons} \\
+C6 & Co2 uses the same flag and a GPT-4 judgement of correctness. & Co2 inherits C5 and needs a paid model. & Eq.~\eqref{eq:cons} with exact match \\
+C7 & A failed request is retried by unbounded recursion; TLS certificates are not verified. & A persistent failure blocks the run; the server is not authenticated. & Eq.~\eqref{eq:call} \\
+C8 & An error object of the API becomes the reply (its message, or the word \texttt{Error}). & Error text enters the debate and is scored as an answer. & Eqs.~\eqref{eq:call}--\eqref{eq:status} \\
+\midrule
+P1 & The default pool has 10 Wikipedia and 5 Google passages; the paper specifies 5 and 5. & MADKE-X lists \VTokRedMean\% fewer tokens per selection call (Table~\ref{tab:pool}). & Eq.~\eqref{eq:pool} \\
+P2 & Duplicate passages are not removed. & \VDupTotal{} passages of the specified pools repeat an earlier passage. & Eq.~\eqref{eq:dedup} \\
+P3 & Wikipedia passages are listed first for every question. & Answer-bearing passages, often Google snippets, come late (Table~\ref{tab:ordering}). & Eqs.~\eqref{eq:bm25}--\eqref{eq:rrf} \\
+\midrule
+R1 & Results are point estimates without intervals or tests. & \VPowOver{} of \VPowN{} published margins need more than 500 questions (Figure~\ref{fig:power}). & Paired protocol (Sec.~\ref{sec:design}) \\
+X1 & The output holds the raw prompts and replies only. & No structured link leads from an answer to its evidence. & Trace, Eq.~\eqref{eq:support} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three remarks put the table in perspective. First, the findings describe the code that is published. They do not show which code produced the published numbers, and finding C2 is a case in point. The shares printed in the main table of the paper are multiples of $1/500$ in \VPubMultiples{} of \VPubCells{} cells (the exception is \VPubOdd). This fits an evaluation on 500 questions; shares of 441 questions would end in an odd digit about half of the time. The slice is therefore most probably a leftover of an interrupted run that was resumed. It matters for those who run the release today, not for the published table.
+
+Second, some choices of the release are sensible and are kept. Reading the selection from the end of the reply suits an agent that reasons first and concludes last. MADKE-X keeps this reading and only widens what counts as a selection (Section~\ref{sec:m_interface}).
+
+Third, the findings interact. With C3, an agent that writes its selection as a list reads no evidence in that round. With C4 and C5, debates run longer than needed and the reported consistency is too low. With C1, the final answer is written from a mislabelled prompt even when the debate went well, and with C8 a temporary failure of the API becomes a wrong answer instead of a missing one. None of these effects depends on the quality of the backbone model, which is why they can be measured offline with scripted agents (Section~\ref{sec:offline}).

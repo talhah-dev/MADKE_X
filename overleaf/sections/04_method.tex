@@ -1,0 +1,363 @@
+\section{The proposed method: MADKE-X}
+\label{sec:method}
+
+MADKE-X leaves the debate of MADKE as it is and changes what surrounds it. The agents, the debate prompts, the round budget and the order of selecting, answering, judging and summarising are those of Section~\ref{sec:baseline}. Four components are added, and each one answers a group of the findings in Table~\ref{tab:defects}. The \emph{failure-aware interface layer} (Section~\ref{sec:m_interface}) governs the text that passes between the model and the pipeline: every call reports success or failure, the selection of an agent and the verdict of the judge are read in any common format, and the debate statistics are computed from stored verdicts. The \emph{evidence governor} (Section~\ref{sec:m_governor}) decides which passages enter the pool and in which order they are listed. The \emph{decision trace with citations} (Section~\ref{sec:m_trace}) records what the pipeline did for a question and checks whether the final answer occurs in the passages the summariser cites. The \emph{bounded verification step} (Section~\ref{sec:m_verify}) gives the summariser one more attempt when that check fails. Figure~\ref{fig:architecture} shows the complete method, from the shipped question and passage lists to the final answer and its trace, and Table~\ref{tab:notation} lists the symbols. Every equation below corresponds to one function of the released code. After the symbols of an equation are defined, a paragraph headed \emph{Effect on the results} states what the equation changes; the measurements behind these statements are reported in Section~\ref{sec:offline}.
+
+\begin{figure}[!htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\small,
+  box/.style={draw=blue!60!black, fill=blue!6, rounded corners=2pt, align=center, minimum height=1.7cm, text width=4.4cm, inner sep=4pt},
+  inbox/.style={box, draw=gray!70!black, fill=gray!12},
+  outbox/.style={box, draw=green!40!black, fill=green!8},
+  clibox/.style={box, draw=orange!70!black, fill=orange!10},
+  arr/.style={-{Stealth[length=2.5mm]}, thick, black!70},
+  lbl/.style={font=\footnotesize, text=black!80, fill=white, inner sep=1.5pt}]
+% row 0: reference statistics
+\node[inbox, minimum height=1.2cm] (ref) at (5.6,3.0) {\textbf{Reference set} $B$ (built once per file)\\ BM25 statistics of all pool candidates};
+% row 1: input and evidence governor
+\node[inbox] (in) at (0,0) {\textbf{Input}\\ question $q$\\ Wikipedia list $W$, Google list $G$\\ (shipped files, SHA-256 verified)};
+\node[box] (gov) at (5.6,0) {\textbf{Evidence governor}\\ (Eqs.~\ref{eq:pool}--\ref{eq:rrf})\\ first $w{=}5$ + $g{=}5$, de-duplicate by $\nu$\\ RRF of $\rho(e)$ and BM25 rank $\beta(e)$};
+\node[box] (pool) at (11.2,0) {\textbf{Ordered pool} $E$, $m=|E|$\\ manifest per passage:\\ index, source, $\rho(e)$, SHA-256};
+% row 2: debate round
+\node[box] (sel) at (0,-4.7) {\textbf{Agent $i$: select}\\ reply $r_i^{(r)}$ $\rightarrow$ parser (Eq.~\ref{eq:parse})\\ delivered $I_i^{(r)}$, $|I_i^{(r)}|\le k$};
+\node[box] (ans) at (5.6,-4.7) {\textbf{Agent $i$: answer}\\ reads $E[I_i^{(r)}]$ and the\\ answers of the other agents\\ $\rightarrow a_i^{(r)}$};
+\node[box] (judge) at (11.2,-4.7) {\textbf{Judge} + verdict parser\\ (Eq.~\ref{eq:verdict})\\ $v_r \in \{\text{yes},\text{no}\}$, stop at $R_q$};
+% row 3: summarise, check, verify
+\node[box] (summ) at (11.2,-8.9) {\textbf{Summariser}\\ prompt bound by keyword\\ answer $\hat y$ with $\{E\#\}$ citations $C$\\ (Eq.~\ref{eq:cite})};
+\node[box] (sup) at (5.6,-8.9) {\textbf{Support check} $\sigma$\\ (Eq.~\ref{eq:support})\\ does $\nu(\hat y)$ occur in a\\ cited passage $E_c$?};
+\node[box] (ver) at (0,-8.9) {\textbf{Bounded verification}\\ (Eq.~\ref{eq:verify})\\ at most one extra call;\\ adopt $\hat y'$ only if supported};
+% row 4: output and client
+\node[outbox, text width=9.6cm] (outn) at (8.4,-12.8) {\textbf{Output:} final answer $\hat y_{\mathrm{final}}$ and decision trace\\ (pool manifest; delivered, dropped and out-of-range identifiers;\\ verdicts $v_r$; citations $C$; status $\sigma$; verification record)};
+\node[clibox] (cli) at (0,-12.8) {\textbf{Failure-aware client}\\ (Eqs.~\ref{eq:call}--\ref{eq:emf1}), used by every call:\\ ok, text, error, attempts;\\ failed call $\Rightarrow$ question failed};
+% debate frame
+\begin{scope}[on background layer]
+\node[draw=blue!45, dashed, thick, rounded corners, fit=(sel)(ans)(judge), inner sep=8pt] (deb) {};
+\end{scope}
+\node[font=\footnotesize\itshape, text=blue!50!black, anchor=north west] at ([yshift=-1pt]deb.south west) {debate round $r = 1,\dots,R$ (prompts and control flow as in MADKE)};
+% arrows
+\draw[arr] (ref) -- (gov);
+\draw[arr] (in) -- (gov);
+\draw[arr] (gov) -- (pool);
+\draw[arr] (pool.south) -- ++(0,-0.7) -| node[lbl, pos=0.3, above] {pool listing $[0],\dots,[m{-}1]$} ([xshift=-8mm]sel.north);
+\draw[arr] (sel) -- (ans);
+\draw[arr] (ans) -- (judge);
+\draw[arr] (judge.north) -- ++(0,0.85) -| node[lbl, pos=0.3, above] {$v_r=$ no and $r<R$: next round} ([xshift=8mm]sel.north);
+\draw[arr] (judge.south) -- node[lbl, right=2pt] {$v_r=$ yes or $r=R$} (summ.north);
+\draw[arr] (summ) -- (sup);
+\draw[arr] (sup) -- node[lbl, above] {not supported} (ver);
+\draw[arr] (sup.south) -- node[lbl, right=2pt] {supported} (sup.south |- outn.north);
+\draw[arr] (ver.south) -- ++(0,-0.9) -| node[lbl, pos=0.25, above] {adopted or kept} ([xshift=-4.2cm]outn.north);
+\end{tikzpicture}%
+}
+\caption{Complete methodology of MADKE-X, from the shipped question and passage lists to the final answer and its decision trace. Grey: input as shipped with MADKE and the reference statistics derived from it. Blue: components of the pipeline. Dashed frame: one debate round, with prompts and control flow as in MADKE. Orange: the failure-aware client through which every model call passes. Green: output. Equation numbers refer to Section~\ref{sec:method}.}
+\label{fig:architecture}
+\end{figure}
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Notation.}
+\label{tab:notation}
+\begin{tabular}{p{0.24\textwidth}p{0.68\textwidth}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$q$, $G_q$ & question (or claim, for FEVER) and its set of gold answers \\
+$Q$, $Q_c$ & questions evaluated; those whose status is \emph{completed} \\
+$A$, $R$, $R_q$ & number of agents (2); maximum number of rounds (3); rounds executed for $q$ \\
+$W$, $G$ & Wikipedia and Google passage lists of $q$, in retrieval order \\
+$w$, $g$ & number of Wikipedia and Google passages taken (5 and 5) \\
+$E=(E_0,\dots,E_{m-1})$ & ordered evidence pool of size $m$ \\
+$B$, $N_B$ & reference set of passages for the BM25 statistics; its size \\
+$\rho(e)$, $\pi(e)$, $\beta(e)$ & rank of $e$ in its source list; position in the concatenated list; BM25 rank \\
+$\nu(\cdot)$ & text normalisation: lower case, punctuation replaced by spaces, whitespace collapsed \\
+$k$ & maximum number of passages delivered per selection (3) \\
+$r_i^{(r)}$, $I_i^{(r)}$ & selection reply of agent $i$ in round $r$; identifiers delivered to it \\
+$U_q$ & union of all $I_i^{(r)}$ for question $q$ \\
+$v_r$ & parsed verdict of the judge in round $r$ \\
+$\hat y$, $C$, $C^\star$ & answer of the summariser; identifiers it cites; cited identifiers that are valid \\
+$\sigma$ & support status of an answer \\
+$\mathbb{1}[\cdot]$ & indicator function, 1 if the condition holds and 0 otherwise \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ------------------------------------------------------------------
+\subsection{Failure-aware interface layer}
+\label{sec:m_interface}
+
+The interface layer sits between the debate and the model server. It has five parts: an explicit result for every model call, keyword binding of the summariser prompt, a parser for the evidence selection, a parser for the verdict of the judge, and the debate statistics computed from the stored verdicts.
+
+\paragraph{Explicit call results and scoring on the completed set}
+A call to the model returns a tuple instead of a bare string,
+\begin{equation}
+\mathrm{call}(\mathbf{m}) = (\mathrm{ok},\; s,\; \epsilon,\; \tau), \qquad 1 \le \tau \le T_{\max}+1,
+\label{eq:call}
+\end{equation}
+where $\mathbf{m}$ is the list of messages sent to the model, $\mathrm{ok}\in\{0,1\}$ states whether a usable reply was received, $s$ is the text of the reply (empty when $\mathrm{ok}=0$), $\epsilon$ describes the error, $\tau$ is the number of attempts made and $T_{\max}$ is the retry budget (three, with exponential back-off). Network errors, time-outs, rate limits, server errors and unreadable responses are retried; other client errors fail at once. The status of a question follows from its mandatory calls, which are the selection, answer, judge and summariser calls:
+\begin{equation}
+\begin{aligned}
+\mathrm{status}(q) &=
+\begin{cases}
+\text{failed} & \text{if a mandatory call of } q \text{ ends with } \mathrm{ok}=0,\\
+\text{completed} & \text{otherwise},
+\end{cases}\\
+Q_c &= \{q \in Q : \mathrm{status}(q)=\text{completed}\}.
+\end{aligned}
+\label{eq:status}
+\end{equation}
+Accuracy is computed on the completed set only. With $\hat y_q$ the final answer of $q$ and $\mathrm{norm}(\cdot)$ the SQuAD answer normalisation \cite{rajpurkar2016squad},
+\begin{equation}
+\begin{aligned}
+\mathrm{EM} &= \frac{1}{|Q_c|}\sum_{q\in Q_c} \max_{g\in G_q} \mathbb{1}\big[\mathrm{norm}(\hat y_q)=\mathrm{norm}(g)\big],\\
+\mathrm{F1} &= \frac{1}{|Q_c|}\sum_{q\in Q_c} \max_{g\in G_q} F_1\big(\mathrm{norm}(\hat y_q),\mathrm{norm}(g)\big),
+\end{aligned}
+\label{eq:emf1}
+\end{equation}
+where $F_1$ is the harmonic mean of token precision and recall between the prediction and a gold answer. The number of failed questions $|Q\setminus Q_c|$ is reported next to every accuracy value, so a run that loses many questions cannot pass as a clean one.
+
+\emph{Effect on the results.} In the release, a request that raises an exception is repeated without limit, and an error object returned by the server becomes the reply of the agent. The error text then enters the debate, can be taken over by the other agent and is finally scored as a wrong answer (findings C7 and C8). Equations~\eqref{eq:call}--\eqref{eq:emf1} turn such a failure into a counted and excluded question. In the fault-injection experiment of Section~\ref{sec:r_failure}, in which \VFailRate\% of the calls fail, the release scored \VFailScoredRel{} of \VFailNAll{} questions although at least one of their calls had failed and marked none of them. MADKE-X marked \VFailFlaggedX{} questions as failed and scored none of these. Without failures every question completes and Eq.~\eqref{eq:emf1} reduces to the usual definitions. The same client verifies TLS certificates unless the user switches verification off for a local server.
+
+\paragraph{Keyword binding of the summariser prompt}
+The summariser prompt has a slot for the question and a slot for the debate transcript. MADKE-X passes both by name, and a positional call is rejected by the interpreter. Each record stores whether the last line of the prompt that starts with ``Question:'' holds the question.
+
+\emph{Effect on the results.} The release passes the two arguments by position and in the wrong order (finding C1). Under scripted agents the question slot holds the question in \VBindRel{} of \VNQuestions{} prompts of the release and in all \VBindX{} prompts of MADKE-X. A swapped prompt still contains the question and the debate, so a capable model may cope with it. How much the swap costs in accuracy is an empirical question for the live comparison.
+
+\paragraph{Evidence selection parser}
+Let $\mathrm{br}(r)=(u_1,\dots,u_\ell)$ be the bracket groups of a selection reply $r$ and $Z(r)=(z_1,\dots,z_n)$ the integers that occur in these groups, both in written order. With pool size $m$ and cap $k=3$,
+\begin{equation}
+\begin{aligned}
+\mathrm{NF}(r) &= \mathbb{1}\big[\exists j: u_j \text{ matches } \texttt{no[- ]?found} \text{ (any case)}\big],\\
+Z^{\mathrm{in}} &= (z_j : 0\le z_j<m), \qquad D = \mathrm{last}\big(Z^{\mathrm{in}}\big),\\
+O &= \mathrm{first}\big((z_j : z_j<0 \,\vee\, z_j\ge m)\big),\\
+\mathrm{parse}(r,m,k) &=
+\begin{cases}
+\big(\varnothing,\ 1,\ D,\ \varnothing,\ O\big) & \text{if } \mathrm{NF}(r)=1,\\
+\big(D_{n_D-k+1:n_D},\ 0,\ \varnothing,\ D_{1:n_D-k},\ O\big) & \text{otherwise},
+\end{cases}
+\end{aligned}
+\label{eq:parse}
+\end{equation}
+where $Z^{\mathrm{in}}$ holds the valid identifiers in written order with repetitions, $\mathrm{last}(\cdot)$ keeps every identifier once, at the position of its last occurrence, $\mathrm{first}(\cdot)$ keeps it at its first occurrence, and $n_D=|D|$. The five components of the result are the delivered identifiers, the not-found flag, the ignored identifiers, the dropped identifiers and the out-of-range identifiers. $D_{n_D-k+1:n_D}$ denotes the last $k$ elements of $D$ (all of $D$ when $n_D\le k$) and $D_{1:n_D-k}$ the elements before them. The identifiers delivered to agent $i$ in round $r$ are $I_i^{(r)} = D_{n_D-k+1:n_D}$, and $U_q=\bigcup_{i,r} I_i^{(r)}$ is their union over all agents and rounds. Algorithm~\ref{alg:parse} gives the procedure.
+
+The parser treats the end of the reply as the selection. The selection prompt asks the agent to think step by step and to put the not-found marker at the end, so an agent may mention passages while it reasons and state its choice last. The same convention holds elsewhere in the pipeline, where the last bracket group is the answer and the last verdict word is the verdict. The release reads the reply from the end as well, and Eq.~\eqref{eq:parse} keeps this choice: for every reply that the release can read, both parsers deliver the same passages. They differ in three respects. Eq.~\eqref{eq:parse} reads the integers inside any bracket group, so a list in one bracket is understood. It recognises the not-found marker in any spelling. And it delivers the passages in the order in which the agent wrote them, where the release delivers them in reverse.
+
+\emph{Effect on the results.} Table~\ref{tab:formats}a shows both parsers on fixed replies. For \texttt{[2, 0, 7]} the release delivers nothing, and the debater then answers without evidence. Under scripted replies whose intended selection is known, the release loses \VSetBadRel{} of \VSelRel{} selections in this way, and MADKE-X loses none of \VSelX{} (Section~\ref{sec:r_interface}). MADKE-X also records what it does not deliver: \VDroppedX{} replies with identifiers beyond the cap and \VOutRangeX{} with identifiers outside the pool. The order of delivery has less weight than the set, since it only changes the sequence in which a debater reads its passages.
+
+\begin{algorithm}[!htbp]
+\caption{ParseEvidenceIDs (Eq.~\ref{eq:parse})}
+\label{alg:parse}
+\Input{reply $r$, pool size $m$, cap $k{=}3$}
+\Output{delivered identifiers, not-found flag, ignored, dropped and out-of-range identifiers}
+$Z^{\mathrm{in}} \leftarrow [\,]$, $O \leftarrow [\,]$, $f \leftarrow \textbf{false}$\;
+\ForEach{bracket group $u$ of $r$, in written order}{
+  \lIf{$u$ matches no[- ]?found (any case)}{$f \leftarrow \textbf{true}$}
+  \Else{
+    \ForEach{integer $z$ in $u$, in written order}{
+      \lIf{$0 \le z < m$}{append $z$ to $Z^{\mathrm{in}}$}
+      \lElseIf{$z \notin O$}{append $z$ to $O$}
+    }
+  }
+}
+$D \leftarrow$ the distinct elements of $Z^{\mathrm{in}}$, each at the position of its last occurrence\;
+\lIf{$f$}{\textbf{return} $([\,],\ \textbf{true},\ \text{ignored}=D,\ [\,],\ O)$}
+\textbf{return} (last $k$ elements of $D$, \textbf{false}, $[\,]$, dropped $=$ the elements before them, $O$)\;
+\end{algorithm}
+
+\paragraph{Judge verdict and stopping round}
+For the judge reply $j_r$ of round $r$, the verdict is read from the last bracket group that holds a verdict word:
+\begin{equation}
+\begin{aligned}
+v_r = \psi(j_r) &=
+\begin{cases}
+\mathrm{strip}(u^\ast) & \text{if } u^\ast \text{ exists},\\
+\text{unparsed} & \text{otherwise},
+\end{cases}\\
+R_q &= \min\big(\{r : v_r=\text{yes}\}\cup\{R\}\big),
+\end{aligned}
+\label{eq:verdict}
+\end{equation}
+where $\mathrm{strip}$ removes quotes, punctuation and spaces at both ends of a group and converts it to lower case, and $u^\ast$ is the last group $u\in \mathrm{br}(j_r)$ with $\mathrm{strip}(u)\in\{\text{yes},\text{no}\}$. The debate stops after round $R_q$ and the summariser is called once. An unparsed verdict counts as no agreement and is recorded as such.
+
+\emph{Effect on the results.} The release takes the judge to agree if some bracket group equals \texttt{Yes} (finding C4). Table~\ref{tab:formats}b lists the consequences: \texttt{["Yes"]}, \texttt{[yes]} and \texttt{[Yes.]} are read as disagreement, and a judge that repeats an agent answer \texttt{[Yes]} before it writes \texttt{[No]} is read as agreeing. In the scripted re-run of the release the literal test misses \VMissedPctRel\% of the judge replies that state agreement, and \VStopLateRel{} of \VNQuestions{} debates run past the round of agreement. Every additional round costs $2A+1=5$ model calls. With Eq.~\eqref{eq:verdict} every debate of MADKE-X ends in the round of agreement or, without agreement, in the last round.
+
+\paragraph{Debate statistics}
+The two statistics of MADKE are computed on the completed set from the stored verdicts:
+\begin{equation}
+\begin{aligned}
+\mathrm{Cons} &= \frac{1}{|Q_c|}\sum_{q\in Q_c} \gamma_q, \qquad \gamma_q = \mathbb{1}\Big[\exists\, r\le R_q : v_r^{(q)}=\text{yes}\Big],\\
+\mathrm{Co2} &= \frac{1}{|Q_c|}\sum_{q\in Q_c} \gamma_q\, c_q, \qquad c_q = \max_{g\in G_q}\mathbb{1}\big[\mathrm{norm}(\hat y_q)=\mathrm{norm}(g)\big].
+\end{aligned}
+\label{eq:cons}
+\end{equation}
+Here $v_r^{(q)}$ is the verdict of round $r$ for question $q$, $\gamma_q$ states whether the judge reported agreement in any executed round, the last one included, and $c_q$ states whether the final answer is an exact match. Cons is the consistency ratio and Co2 the consistent-and-correct ratio of MADKE; $\mathrm{Cons}-\mathrm{Co2}$ is the share of questions on which the agents agreed on a wrong answer. MADKE judges correctness with GPT-4 on the question-answering datasets. Equation~\eqref{eq:cons} uses exact match on every dataset, which needs no paid model. Exact match is stricter than a model judge, so the level of Co2 is not comparable with the published values, while the two systems of this study are compared under one criterion.
+
+\emph{Effect on the results.} The evaluation script of the release counts a debate as consistent if it stopped before the last round. For a debate that used all rounds it tests whether \texttt{[Yes]} is a member of the dictionary that stores the round; that test compares the string with the keys of the dictionary and never succeeds (finding C5). In the scripted re-run of the release, the judge replies state agreement in \VConsTrueRel\% of the debates and the formula reports \VConsFormRel\% (Table~\ref{tab:consistency}). For MADKE-X, Eq.~\eqref{eq:cons} equals a direct count over the stored verdicts on every dataset.
+
+%% ------------------------------------------------------------------
+\subsection{Evidence governor}
+\label{sec:m_governor}
+
+The evidence governor builds the pool that is shown to the agents. It takes the specified number of passages from each source, removes duplicates and orders the rest by fusing two rankings. It uses neither a gold answer nor a model, so it can be applied to any question at inference time.
+
+\paragraph{Pool construction}
+The candidate list is the concatenation of the first $w$ Wikipedia and the first $g$ Google passages, each labelled with its source and its rank in that source:
+\begin{equation}
+\begin{aligned}
+E^{(0)} &= W_{1:w} \,\|\, G_{1:g},\\
+\rho(e) &= \text{rank of } e \text{ in its source list}, \qquad \pi(e) = \text{position of } e \text{ in } E^{(0)},
+\end{aligned}
+\label{eq:pool}
+\end{equation}
+where $\|$ denotes concatenation, $w=g=5$ as specified in the MADKE paper, and $\rho(e)\in\{1,\dots,5\}$.
+
+\paragraph{De-duplication}
+A passage is kept only if no earlier passage has the same normalised text:
+\begin{equation}
+E^{(1)} = \big\{ e\in E^{(0)} : \nexists\, e'\in E^{(0)} \text{ with } \pi(e')<\pi(e) \text{ and } \nu(e')=\nu(e) \big\},
+\label{eq:dedup}
+\end{equation}
+where $\nu$ converts the text to lower case, replaces punctuation by spaces and collapses whitespace. Copies that differ only in case, spacing or punctuation are thus recognised as one passage.
+
+\paragraph{Question-only BM25 rank}
+Each remaining passage is scored against the question with Okapi BM25:
+\begin{equation}
+\begin{aligned}
+\mathrm{BM25}(q,e) &= \sum_{t\in q} \mathrm{idf}(t)\;
+\frac{f(t,e)\,(k_1+1)}{f(t,e)+k_1\big(1-b+b\,|e|/\bar L_B\big)},\\
+\mathrm{idf}(t) &= \ln\!\Big(\frac{N_B-n_t+0.5}{n_t+0.5}+1\Big),
+\end{aligned}
+\label{eq:bm25}
+\end{equation}
+where $t$ runs over the tokens of the question, $f(t,e)$ is the frequency of $t$ in $e$, $|e|$ is the length of $e$ in tokens, and $k_1=1.5$ and $b=0.75$ are the usual constants. The statistics come from a reference set $B$: $N_B$ is the number of passages in $B$, $n_t$ the number of them that contain $t$, and $\bar L_B$ their mean length. $B$ consists of all passages that can enter a pool, that is, the first $w$ Wikipedia and the first $g$ Google passages of every question in the benchmark file (\VIndexNMin{} to \VIndexNMax{} passages). It is built once per file, uses no gold answer and does not depend on which questions are evaluated, so a run in batches builds the same pools as a single run. The lexical rank $\beta(e)\in\{1,\dots,|E^{(1)}|\}$ is the position of $e$ when the passages are sorted by decreasing score, with ties broken by $\pi(e)$.
+
+The statistics are taken from $B$ and not from the pool itself for a reason. The ten passages of one pool were all retrieved for the same question, so the terms of that question occur in most of them. Document frequencies counted inside the pool would give exactly these terms a weight close to zero.
+
+\paragraph{Reciprocal rank fusion}
+The final order combines the retrieval rank with the lexical rank:
+\begin{equation}
+S_{\mathrm{RRF}}(q,e) = \frac{1}{\kappa+\rho(e)} + \frac{1}{\kappa+\beta(e)}, \qquad \kappa = 60, \qquad
+E = \operatorname{sort}_{\downarrow S_{\mathrm{RRF}},\,\uparrow \pi}\big(E^{(1)}\big),
+\label{eq:rrf}
+\end{equation}
+where $\kappa$ is the smoothing constant recommended by Cormack et al.~\cite{cormack2009rrf}, which keeps a single first place from dominating the fused score, and ties are broken by the position in the concatenated list. The 0-based position of a passage in $E$ is the identifier that is shown to the agents and used in citations. Algorithm~\ref{alg:pool} summarises the governor.
+
+\emph{Effect on the results.} Equation~\eqref{eq:pool} replaces the default pool of the release, ten Wikipedia and five Google passages, by the specified five and five. The evidence listing of a selection call shrinks by \VTokRedMin{} to \VTokRedMax\% (\VTokRedMean\% on average over the five datasets), and a question has up to six such calls. The smaller pool has a price: the share of questions that have any answer-bearing passage falls by \VCoverLossTQA{} points on TriviaQA and by up to \VCoverLossMax{} points on the other datasets. Equation~\eqref{eq:dedup} removes \VDupMin{} to \VDupMax{} duplicates per dataset. Equations~\eqref{eq:bm25} and~\eqref{eq:rrf} have the largest effect. The share of questions with an answer-bearing passage among the first three rises from \VCovThreeOrigTQA\% to \VCovThreeRrfTQA\% on TriviaQA, from \VCovThreeOrigNQ\% to \VCovThreeRrfNQ\% on NQ, from \VCovThreeOrigHQA\% to \VCovThreeRrfHQA\% on HotpotQA and from \VCovThreeOrigWMQ\% to \VCovThreeRrfWMQ\% on 2WikiMultihopQA, each significant under the paired exact McNemar test. The fusion matters on NQ, where the Wikipedia retrieval order is already informative. BM25 alone lowers the share of questions with an answer-bearing passage in first place from \VCovOneOrigNQ\% to \VCovOneBmNQ\%; the fused order keeps it at \VCovOneRrfNQ\% and still improves the first three and the first five positions. Building a pool takes \VBuildXMin{} to \VBuildXMax\,ms per question.
+
+\begin{algorithm}[!htbp]
+\caption{BuildPool, the evidence governor (Eqs.~\ref{eq:pool}--\ref{eq:rrf})}
+\label{alg:pool}
+\Input{question $q$, lists $W$ (Wikipedia) and $G$ (Google), reference statistics of $B$, $w{=}5$, $g{=}5$, $\kappa{=}60$}
+\Output{ordered pool $E$ with manifest}
+$E \leftarrow W[{:}w] \,\|\, G[{:}g]$, recording source, source rank $\rho(e)$ and position $\pi(e)$\;
+remove every $e$ whose normalised text $\nu(e)$ was already seen\;
+compute $\mathrm{BM25}(q,e)$ with the statistics of $B$ and rank the passages to obtain $\beta(e)$\;
+$S(e) \leftarrow 1/(\kappa+\rho(e)) + 1/(\kappa+\beta(e))$\;
+sort $E$ by decreasing $S(e)$, ties by increasing $\pi(e)$\;
+\textbf{return} $E$ and its manifest (index, source, $\rho(e)$, SHA-256 of the text)\;
+\end{algorithm}
+
+%% ------------------------------------------------------------------
+\subsection{Decision trace and citations}
+\label{sec:m_trace}
+
+Every answer record carries a trace with four parts: (i) the pool manifest, that is, the index, source, source rank and SHA-256 digest of every passage; (ii) for every round and agent, the identifiers delivered, together with the dropped, ignored and out-of-range identifiers of Eq.~\eqref{eq:parse}; (iii) the verdict of every round as parsed by Eq.~\eqref{eq:verdict}; and (iv) the final answer, the passages it cites and the result of a support check. The trace is written by the pipeline itself. It describes what was done and is not a rationalisation produced afterwards.
+
+\paragraph{Citations}
+The summariser is shown the passages in $U_q$, each labelled $\{E\#\}$ with its pool index, and is asked to cite the passages that state the answer, or to write $\{E\text{-none}\}$ if none does. Curly braces are used because square brackets already delimit the answer. The summariser of MADKE-X therefore has a prompt of its own: it adds the list of citable passages and the citation instruction to the summariser prompt of MADKE and gives one worked example with a citation, where MADKE gives three examples for the question-answering datasets and one for FEVER. The cited identifiers and the valid ones among them are
+\begin{equation}
+C = \mathrm{first}\big((c : \texttt{\{E}c\texttt{\}} \text{ occurs in } s)\big),
+\qquad
+C^\star = \{c\in C : 0\le c<m \;\wedge\; c\in U_q\},
+\label{eq:cite}
+\end{equation}
+where $s$ is the reply of the summariser. A citation is valid only if it points into the pool and to a passage that some agent selected.
+
+\paragraph{Lexical support check}
+Let $\hat y$ be the answer taken from the last bracket group of $s$, and let $\mathcal{V}=\{\text{yes},\ \text{no},\ \text{supports},\ \text{refutes},\ \text{not enough info}\}$ be the set of verdict answers. Then
+\begin{equation}
+\sigma =
+\begin{cases}
+\text{not\_applicable} & \text{if } q \text{ is a FEVER claim or } \nu(\hat y)\in\mathcal{V},\\
+\text{empty\_answer} & \text{if } \nu(\hat y)=\varepsilon,\\
+\text{no\_citation} & \text{if } C^\star=\varnothing,\\
+\text{supported} & \text{if } \exists\, c\in C^\star : \nu(\hat y) \sqsubseteq_{w} \nu(E_c),\\
+\text{cited\_but\_answer\_not\_found} & \text{otherwise},
+\end{cases}
+\label{eq:support}
+\end{equation}
+where the cases are tested from top to bottom, $\varepsilon$ is the empty string and $x \sqsubseteq_{w} y$ means that $x$ occurs in $y$ as a sequence of whole words. Whole-word matching keeps ``Paris'' from being found in ``comparison'' and ``5'' in ``1957''. A verdict such as ``yes'' is not an answer span that a passage could contain, so the check is not applied to it. The support rate over the set $Q_c^{\mathrm{app}}$ of completed questions with an applicable status is
+\begin{equation}
+\mathrm{SR} = \frac{1}{|Q_c^{\mathrm{app}}|}\sum_{q\in Q_c^{\mathrm{app}}} \mathbb{1}\big[\sigma_q=\text{supported}\big].
+\label{eq:sr}
+\end{equation}
+Algorithm~\ref{alg:support} gives the check.
+
+\emph{Effect on the results.} The release stores the raw prompts and replies of every round. The evidence behind an answer can be recovered from them only by parsing the prompts again, and nothing states which passages support the final answer (finding X1). In the scripted runs of MADKE-X, all \VCiteParsed{} citations resolve to a pool passage that an agent had selected, and recomputing the status from the trace reproduces the stored status for all \VNQuestions{} records. The check is conservative by design. It detects that the answer string is absent from the cited passages; a correct paraphrase is therefore flagged as unsupported, and a string that occurs by coincidence is accepted. In return it needs no model, and anyone can recompute its outcome from the trace.
+
+\begin{algorithm}[!htbp]
+\caption{SupportCheck (Eq.~\ref{eq:support})}
+\label{alg:support}
+\Input{answer $\hat y$, cited identifiers $C$, delivered union $U_q$, pool $E$}
+\Output{status $\sigma$}
+\lIf{$q$ is a FEVER claim or $\nu(\hat y) \in \mathcal{V}$}{\textbf{return} not\_applicable}
+$C^\star \leftarrow \{c \in C : 0 \le c < m,\ c \in U_q\}$\;
+\lIf{$\nu(\hat y)$ is empty}{\textbf{return} empty\_answer}
+\lIf{$C^\star = \emptyset$}{\textbf{return} no\_citation}
+\lIf{$\nu(\hat y)$ occurs as whole words in $\nu(E_c)$ for some $c \in C^\star$}{\textbf{return} supported}
+\textbf{return} cited\_but\_answer\_not\_found\;
+\end{algorithm}
+
+%% ------------------------------------------------------------------
+\subsection{Bounded verification}
+\label{sec:m_verify}
+
+When the support check of the summariser answer fails, MADKE-X calls the summariser once more. The call lists the passages in $U_q$ and instructs the model to answer only if one of them states the answer, citing that passage, and otherwise to abstain with \texttt{[Unsupported]} $\{E\text{-none}\}$. The second reply $s'$ is requested only if the trigger holds, and its answer is adopted only if it is supported:
+\begin{equation}
+\begin{aligned}
+&\text{trigger:}\quad \sigma(\hat y, C^\star, E) \notin \{\text{supported},\ \text{not\_applicable}\},\\
+&\hat y_{\mathrm{final}} =
+\begin{cases}
+\hat y' & \text{if } \sigma(\hat y', C'^\star, E) = \text{supported},\\
+\hat y & \text{otherwise},
+\end{cases}
+\end{aligned}
+\label{eq:verify}
+\end{equation}
+where $\hat y'$ and $C'^\star$ are the answer and the valid citations of $s'$, obtained with Eq.~\eqref{eq:cite}. An abstention is never adopted, because it cites no passage. A verification call that fails leaves the first answer in place and does not fail the question, since the step is optional. The number of model calls per question is bounded by
+\begin{equation}
+C_{\mathrm{X}}(q) \le R_q\,(2A+1) + 1 + 1 \le C_{\max}+1,
+\label{eq:callbound}
+\end{equation}
+with $C_{\max}$ from Eq.~\eqref{eq:calls}. Algorithm~\ref{alg:control} shows how the step fits into the control flow.
+
+\emph{Effect on the results.} The step replaces an answer only by a supported one, and it is never applied to a supported answer. In a stress test with a scripted summariser that always cites the first listed passage, whether or not the passage contains the answer, the first answer is supported for \VStressBeforeMin{} to \VStressBeforeMax\% of the questions. The step is then called \VStressCalls{} times on four datasets. In \VStressSame{} cases the second reply keeps the answer and cites a passage that contains it, in \VStressNew{} cases it gives a new, supported answer, and in \VStressAbst{} cases it abstains. The support rate ends at \VStressAfterMin\% or higher on every dataset, and no supported answer is changed. The cost is at most one call per question, which raises the worst case from 16 to 17 calls. The counts come from scripted agents; they show that the mechanism behaves as specified and do not predict how often a real model will benefit.
+
+\begin{algorithm}[!htbp]
+\caption{MADKE-X control flow}
+\label{alg:control}
+\Input{question $q$, lists $W$ and $G$, reference statistics of $B$, $A$, $R$}
+\Output{answer, status, trace}
+$E \leftarrow$ BuildPool$(q, W, G)$ (Alg.~\ref{alg:pool})\;
+\For{$r = 1$ \KwTo $R$}{
+  \ForEach{agent $i$}{
+    $I_i^{(r)} \leftarrow$ ParseEvidenceIDs(select$(q, E, h_i)$) (Alg.~\ref{alg:parse}); $a_i^{(r)} \leftarrow$ answer$(q, E[I_i^{(r)}], h_i)$\;
+  }
+  $v_r \leftarrow \psi$(judge$(q, a_1^{(r)},\dots,a_A^{(r)})$) (Eq.~\ref{eq:verdict})\;
+  \lIf{a call of this round returned $\mathrm{ok}=0$}{mark $q$ failed; \textbf{break}}
+  \If{$v_r = $ yes \textbf{or} $r = R$}{
+    $s \leftarrow$ summarise(question $=q$, debate $=a^{(r)}$, evidence $=E[U_q]$) with $\{E\#\}$ citations\;
+    $\sigma \leftarrow$ SupportCheck$(s)$ (Alg.~\ref{alg:support})\;
+    \If{$\sigma \notin \{$supported, not\_applicable$\}$}{
+      $s' \leftarrow$ summarise with the verification instruction; adopt $s'$ iff SupportCheck$(s')=$ supported\;
+    }
+    \textbf{break}\;
+  }
+}
+\textbf{return} answer, status, trace\;
+\end{algorithm}
+
+%% ------------------------------------------------------------------
+\subsection{How the components work together}
+The four components act at different stages and depend on each other. The governor determines which evidence can be selected and where it stands in the listing. The parser of Eq.~\eqref{eq:parse} makes sure that the passages an agent asks for are the passages it receives, so the better order reaches the agents. The verdict parser of Eq.~\eqref{eq:verdict} ends the debate when the agents agree, which saves calls and keeps the debate from drifting away from an agreed answer. The trace of Eqs.~\eqref{eq:cite}--\eqref{eq:support} makes the effect of all three visible for every question, and the client of Eqs.~\eqref{eq:call}--\eqref{eq:emf1} ensures that a score is computed only from questions whose calls all succeeded. The selection, answer and judge prompts are those of MADKE. Only the summariser prompt differs, as described in Section~\ref{sec:m_trace}.

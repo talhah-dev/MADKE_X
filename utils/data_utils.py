@@ -193,43 +193,72 @@ def tokenize(text):
 
 
 class BM25:
-    """Okapi BM25 over a list of tokenised documents.
-
-    ``score(query_tokens)`` returns one score per indexed document::
+    """Okapi BM25 with statistics taken from a reference set of tokenised passages::
 
         BM25(q, e) = sum_{t in q} idf(t) * tf(t, e) * (k1 + 1)
                      / (tf(t, e) + k1 * (1 - b + b * |e| / avgdl))
 
         idf(t) = ln( (N - n_t + 0.5) / (n_t + 0.5) + 1 )
+
+    ``N`` (number of passages), ``n_t`` (passages containing ``t``) and ``avgdl``
+    (mean passage length) come from the reference set given to the constructor.
+    ``score_docs`` scores arbitrary passages against a query with these
+    statistics; ``score`` scores the reference passages themselves.
     """
 
-    def __init__(self, docs_tokens, k1=1.5, b=0.75):
+    def __init__(self, docs_tokens, k1=1.5, b=0.75, keep_docs=True):
         self.k1 = k1
         self.b = b
-        self.docs = [Counter(toks) for toks in docs_tokens]
-        self.doc_lens = [len(toks) for toks in docs_tokens]
         self.n_docs = len(docs_tokens)
-        self.avgdl = (sum(self.doc_lens) / self.n_docs) if self.n_docs else 0.0
+        self.avgdl = (sum(len(toks) for toks in docs_tokens) / self.n_docs) if self.n_docs else 0.0
         df = Counter()
-        for counter in self.docs:
-            df.update(counter.keys())
+        for toks in docs_tokens:
+            df.update(set(toks))
         self.idf = {t: math.log((self.n_docs - n + 0.5) / (n + 0.5) + 1.0) for t, n in df.items()}
+        # a term that never occurs in the reference set is treated as maximally rare
+        self.unseen_idf = math.log((self.n_docs + 0.5) / 0.5 + 1.0)
+        self._docs_tokens = docs_tokens if keep_docs else None
 
-    def score(self, query_tokens):
+    def score_docs(self, query_tokens, docs_tokens):
+        """One BM25 score per passage in ``docs_tokens`` for the query, using the reference statistics."""
         scores = []
-        for counter, dl in zip(self.docs, self.doc_lens):
-            s = 0.0
+        for toks in docs_tokens:
+            counter = Counter(toks)
             if self.avgdl > 0:
-                norm = self.k1 * (1.0 - self.b + self.b * dl / self.avgdl)
+                norm = self.k1 * (1.0 - self.b + self.b * len(toks) / self.avgdl)
             else:
                 norm = self.k1
+            s = 0.0
             for t in query_tokens:
                 tf = counter.get(t)
                 if not tf:
                     continue
-                s += self.idf.get(t, 0.0) * tf * (self.k1 + 1.0) / (tf + norm)
+                s += self.idf.get(t, self.unseen_idf) * tf * (self.k1 + 1.0) / (tf + norm)
             scores.append(s)
         return scores
+
+    def score(self, query_tokens):
+        """Scores of the reference passages themselves (pool-local use)."""
+        if self._docs_tokens is None:
+            raise ValueError("this index was built with keep_docs=False; use score_docs()")
+        return self.score_docs(query_tokens, self._docs_tokens)
+
+
+def build_bm25_index(dataset, w=5, g=5):
+    """BM25 reference statistics of a dataset (the index ``B`` of Algorithm 2).
+
+    The reference set consists of the passages that can enter a pool: the first
+    ``w`` Wikipedia and the first ``g`` Google passages of EVERY question in the
+    file.  It uses no gold answer and does not depend on which questions are
+    evaluated, so runs in batches build exactly the same pools as a single run.
+    """
+    corpus = []
+    for q in dataset:
+        wiki = list(q.get("wiki_retrieval") or [])[:w]
+        google = list(q.get("google_retrieval") or [])[:g]
+        for item in wiki + google:
+            corpus.append(tokenize(item.get("contents", "") if isinstance(item, dict) else str(item)))
+    return BM25(corpus, keep_docs=False)
 
 
 def rank_positions(values, higher_is_better=True):
@@ -281,8 +310,9 @@ def build_pool(question, wiki_list, google_list, w=5, g=5, bm25_index=None,
     w, g : int
         Number of wiki / google passages taken (paper default 5 + 5).
     bm25_index : BM25 or None
-        Optional pre-built index whose IDF statistics are used instead of the
-        pool-local statistics (must index exactly the candidate pool in order).
+        Reference statistics (index ``B`` of Algorithm 2), normally built once per
+        dataset with :func:`build_bm25_index`.  When ``None`` the statistics are
+        computed from the pool itself (stand-alone use).
     dedup : bool
         Remove passages whose normalised text was already seen (keep first).
     rrf : bool
@@ -314,8 +344,12 @@ def build_pool(question, wiki_list, google_list, w=5, g=5, bm25_index=None,
 
     q_tokens = tokenize(question)
     docs_tokens = [tokenize(p["contents"]) for p in candidates]
-    index = bm25_index if bm25_index is not None else BM25(docs_tokens)
-    scores = index.score(q_tokens) if candidates else []
+    if bm25_index is not None:
+        scores = bm25_index.score_docs(q_tokens, docs_tokens)
+        reference = {"scope": "dataset", "n_passages": bm25_index.n_docs}
+    else:
+        scores = BM25(docs_tokens).score(q_tokens) if candidates else []
+        reference = {"scope": "pool", "n_passages": len(docs_tokens)}
     betas = rank_positions(scores, higher_is_better=True)
 
     for p, s, beta in zip(candidates, scores, betas):
@@ -341,7 +375,7 @@ def build_pool(question, wiki_list, google_list, w=5, g=5, bm25_index=None,
             "orig_id": p["orig_id"],
         })
     pool_meta = {"candidates": len(_take(wiki_list, w, "wiki")) + len(_take(google_list, g, "google")),
-                 "duplicates_removed": removed}
+                 "duplicates_removed": removed, "bm25_reference": reference}
     return pool, pool_meta
 
 

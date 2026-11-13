@@ -1,32 +1,37 @@
 {
     "triviaqa": {
         "path": ".\\data\\triviaqa\\triviaqa_test_all_retrieval_500.json",
-        "expected": "6b6a0c65c21d82757351365d1cf0a0c4d629f783b73273a6249152ad6409666e",
-        "actual": "6b6a0c65c21d82757351365d1cf0a0c4d629f783b73273a6249152ad6409666e",
-        "ok": true
+        "expected": "7083765ac96a578f529ed9f1d4bbce1ad2da2fb027cbb2c93944fef9f4a398f2",
+        "actual": "7083765ac96a578f529ed9f1d4bbce1ad2da2fb027cbb2c93944fef9f4a398f2",
+        "ok": true,
+        "raw_bytes_sha256": "6b6a0c65c21d82757351365d1cf0a0c4d629f783b73273a6249152ad6409666e"
     },
     "nq": {
         "path": ".\\data\\nq\\nq_test_all_retrieval_500.json",
-        "expected": "f1494bf6f1f97e2faac8312dbb81efdfe67a5a1e77057b8f6fbb5177addf7f2f",
-        "actual": "f1494bf6f1f97e2faac8312dbb81efdfe67a5a1e77057b8f6fbb5177addf7f2f",
-        "ok": true
+        "expected": "491cc7e9274dbffd0d92f380b3821b59a8e0ae59e2bc1313265e2c9196c4cca9",
+        "actual": "491cc7e9274dbffd0d92f380b3821b59a8e0ae59e2bc1313265e2c9196c4cca9",
+        "ok": true,
+        "raw_bytes_sha256": "f1494bf6f1f97e2faac8312dbb81efdfe67a5a1e77057b8f6fbb5177addf7f2f"
     },
     "hotpotqa": {
         "path": ".\\data\\hotpotqa\\hotpotqa_dev_all_retrieval_500.json",
-        "expected": "839d2c1faa09e491eb4260ce9ff786c370744a5fbc03e2238873fd5f92773594",
-        "actual": "839d2c1faa09e491eb4260ce9ff786c370744a5fbc03e2238873fd5f92773594",
-        "ok": true
+        "expected": "81cbae49b334726fbd7c00eae4259e6b49dfb365968332bda81c0dd2332ddae9",
+        "actual": "81cbae49b334726fbd7c00eae4259e6b49dfb365968332bda81c0dd2332ddae9",
+        "ok": true,
+        "raw_bytes_sha256": "839d2c1faa09e491eb4260ce9ff786c370744a5fbc03e2238873fd5f92773594"
     },
     "wikimultihopqa": {
         "path": ".\\data\\wikimultihopqa\\wikimultihopqa_dev_all_retrieval_500.json",
-        "expected": "6aa08ee7c6639fa72d21119dbca25dec1e2bf31a4f5da9796a99385afbd87ed6",
-        "actual": "6aa08ee7c6639fa72d21119dbca25dec1e2bf31a4f5da9796a99385afbd87ed6",
-        "ok": true
+        "expected": "35b78a082404f24bb35355330135f2a20c981fe53adc10a8721639d8aca274a3",
+        "actual": "35b78a082404f24bb35355330135f2a20c981fe53adc10a8721639d8aca274a3",
+        "ok": true,
+        "raw_bytes_sha256": "6aa08ee7c6639fa72d21119dbca25dec1e2bf31a4f5da9796a99385afbd87ed6"
     },
     "fever": {
         "path": ".\\data\\fever\\fever_dev_all_retrieval_500.json",
-        "expected": "3fa23b42177c53a2f6e76f65786a238d64445cd3d1606fde7dfe3d923065d279",
-        "actual": "3fa23b42177c53a2f6e76f65786a238d64445cd3d1606fde7dfe3d923065d279",
-        "ok": true
+        "expected": "532a678af035acfcc943e61b3b246ca4b2c7b92aec1eccd4625b83c2db7f3b32",
+        "actual": "532a678af035acfcc943e61b3b246ca4b2c7b92aec1eccd4625b83c2db7f3b32",
+        "ok": true,
+        "raw_bytes_sha256": "3fa23b42177c53a2f6e76f65786a238d64445cd3d1606fde7dfe3d923065d279"
     }
 }

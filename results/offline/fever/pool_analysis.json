@@ -1,18 +1,31 @@
 {
     "n": 500,
     "task_type": "classification",
-    "avg_legacy_candidates": 14.98,
-    "avg_x_candidates": 9.98,
+    "tokenizer": "tiktoken:cl100k_base",
+    "passages": {
+        "original": 14.98,
+        "specified": 9.98,
+        "x": 9.966
+    },
+    "listing_tokens": {
+        "original": 1684.844,
+        "specified": 936.774,
+        "x": 934.94,
+        "reduction_pct": 44.50880912416817
+    },
     "duplicates_removed": 7,
     "questions_with_duplicates": 7,
-    "avg_x_pool_size": 9.966,
-    "avg_legacy_tokens": 1463.248,
-    "avg_x_nodedup_tokens": 804.272,
-    "avg_x_tokens": 802.66,
-    "token_reduction_pct": 45.1453205471663,
-    "build_time_sec": 5.139429499999096,
-    "build_time_ms_per_q": 10.278858999998192,
-    "peak_memory_kb": 2322.927734375,
-    "tokenizer": "regex-approximation",
-    "ordering": null
+    "cost": {
+        "index_build_ms": 179.7654000001785,
+        "index_passages": 4990,
+        "x_build_ms_per_q": 0.6637488000014855,
+        "original_build_ms_per_q": 0.000458399998024106,
+        "x_peak_memory_kb": 2366.7578125,
+        "original_peak_memory_kb": 85.875
+    },
+    "n_span": 0,
+    "n_verdict_gold": 500,
+    "coverage_pct": null,
+    "ordering": null,
+    "paired_cov3": null
 }

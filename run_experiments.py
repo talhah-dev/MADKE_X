@@ -24,6 +24,7 @@ Examples::
 import argparse
 import json
 import os
+import platform
 import re
 import sys
 import threading
@@ -32,7 +33,7 @@ import tracemalloc
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from debate import legacy_config, madke_x_config, run_debate, select_prompt
+from debate import CODE_VERSION, legacy_config, madke_x_config, run_debate, select_prompt
 from models.openai_compat_agent import OpenAICompatAgent, preflight
 from models.scripted_agent import ScriptedAgent
 from parser import add_agent_backend_args
@@ -40,6 +41,7 @@ from utils.calculate_tokens import count_tokens, tokenizer_name
 from utils.data_utils import (
     DATASETS,
     append_jsonl,
+    build_bm25_index,
     build_pool,
     legacy_pool,
     load_dataset,
@@ -53,6 +55,7 @@ from utils.data_utils import (
 from utils.evaluation_utils import (
     SUPPORT_STATUSES,
     extract_final_answer,
+    is_verdict_answer,
     normalize_text,
     parse_evidence_ids,
     parse_evidence_ids_legacy,
@@ -64,17 +67,26 @@ from utils.metrics_calculator import (
     average_rounds,
     bootstrap_ci,
     compute_co2,
+    compute_co2_original,
     compute_cons,
     compute_cons_original,
+    compute_late_agreement,
     compute_em_f1,
     coverage_and_mrr,
+    expected_random_coverage,
+    expected_random_reciprocal_rank,
     first_hit_rank,
+    has_span_answer,
     is_completed,
+    is_correct,
+    paired_difference_ci,
     paired_em_vectors,
     paired_mcnemar,
+    passage_contains_any,
     support_statistics,
     verification_statistics,
 )
+from utils.prompt_utils import format_evidence_pool
 
 SYSTEM_LABEL = {"madke_legacy": "MADKE (re-run, unpatched)", "madke_x": "MADKE-X"}
 
@@ -150,12 +162,29 @@ def record_had_call_failure(rec):
 
 
 def run_records(data, indices, cfg, prompt, agents, checkpoint=None, concurrency=1, retry_failed=False, label="",
-                max_consecutive_failures=0):
+                max_consecutive_failures=0, bm25_index=None):
     debaters, judge, summarizer = agents
     done = {}
     if checkpoint and os.path.exists(checkpoint):
-        kept = []
+        # Records written by another version of the pipeline are never resumed: results of
+        # different versions must not be mixed in one table.
+        current, stale = [], 0
         for rec in read_jsonl_data(checkpoint, verbose=False):
+            version = ((rec.get("trace") or {}).get("config") or {}).get("code_version")
+            if version != CODE_VERSION:
+                stale += 1
+            else:
+                current.append(rec)
+        if stale:
+            backup = "{}.stale-{}".format(checkpoint, time.strftime("%Y%m%d-%H%M%S"))
+            os.replace(checkpoint, backup)
+            with open(checkpoint, "w", encoding="utf-8") as fw:
+                for rec in current:
+                    fw.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            log("{}: {} checkpointed questions were written by a different code version (current {}); they are "
+                "not resumed and were moved to {}".format(label, stale, CODE_VERSION, backup))
+        kept = []
+        for rec in current:
             if retry_failed and rec.get("status") == "failed":
                 continue
             if rec.get("index") in indices:
@@ -179,7 +208,7 @@ def run_records(data, indices, cfg, prompt, agents, checkpoint=None, concurrency
         if stop.is_set():
             return None
         try:
-            return run_debate(data[i], debaters, judge, summarizer, prompt, cfg, index=i)
+            return run_debate(data[i], debaters, judge, summarizer, prompt, cfg, index=i, bm25_index=bm25_index)
         except Exception as ex:  # never lose a run because of one question
             return failed_record(data[i], i, cfg, "runner exception {}: {}".format(type(ex).__name__, ex))
 
@@ -238,75 +267,251 @@ def run_records(data, indices, cfg, prompt, agents, checkpoint=None, concurrency
 
 
 # ---------------------------------------------------------------------------
-# Pool analysis (Tables 5 and 6)
+# Pool analysis: data only, no agents involved
 # ---------------------------------------------------------------------------
 
-def pool_analysis(dataset_name, data, indices, wiki_k, google_k, rrf_k):
-    extractive = task_type(dataset_name) == "extractive"
-    agg = Counter()
-    ranks = {"source_order": [], "bm25_only": [], "rrf": [], "legacy_15": []}
+def _answers(q):
+    return q["answer"] if isinstance(q["answer"], list) else [q["answer"]]
 
+
+def _best_time(fn, repeat=3):
+    best = None
+    for _ in range(repeat):
+        t0 = time.perf_counter()
+        fn()
+        dt = time.perf_counter() - t0
+        best = dt if best is None else min(best, dt)
+    return best
+
+
+def _peak_memory(fn):
     tracemalloc.start()
-    t0 = time.perf_counter()
-    pools = []
-    for i in indices:
-        q = data[i]
-        pools.append(build_pool(q["question"], q["wiki_retrieval"], q["google_retrieval"], w=wiki_k, g=google_k, rrf_k=rrf_k))
-    build_time = time.perf_counter() - t0
+    keep = fn()                       # the result stays alive while the peak is read
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
+    del keep
+    return peak
 
-    for i, (pool, meta) in zip(indices, pools):
-        q = data[i]
+
+def pool_analysis(dataset_name, data, indices, wiki_k, google_k, rrf_k, n_boot=1000, seed=0, timing=True,
+                  bm25_index=None):
+    """Compare the pool of the release (wiki 10 + Google 5, listed as retrieved) with the pool of
+    MADKE-X (wiki ``wiki_k`` + Google ``google_k``, de-duplicated, RRF order).
+
+    Answer-string measures (coverage, ordering) use whole-word matching of the normalised gold
+    answers and exclude questions whose gold answer is a verdict (yes / no / FEVER label).
+    Timing is measured without memory tracing (best of three passes); memory in a separate pass.
+    """
+    extractive = task_type(dataset_name) == "extractive"
+    qs = [data[i] for i in indices]
+    n = len(qs)
+
+    def build_x():
+        return [build_pool(q["question"], q["wiki_retrieval"], q["google_retrieval"], w=wiki_k, g=google_k,
+                           bm25_index=bm25_index, rrf_k=rrf_k)
+                for q in qs]
+
+    def build_original():             # what the released code does: two list slices
+        return [q["wiki_retrieval"][:10] + q["google_retrieval"][:5] for q in qs]
+
+    cost = None
+    if timing:
+        cost = {"index_build_ms": 1000.0 * _best_time(lambda: build_bm25_index(data, wiki_k, google_k)),
+                "index_passages": bm25_index.n_docs if bm25_index is not None else None,
+                "x_build_ms_per_q": 1000.0 * _best_time(build_x) / n,
+                "original_build_ms_per_q": 1000.0 * _best_time(build_original) / n,
+                "x_peak_memory_kb": _peak_memory(build_x) / 1024.0,
+                "original_peak_memory_kb": _peak_memory(build_original) / 1024.0}
+
+    agg = Counter()
+    ranks = {k: [] for k in ("original", "specified", "interleaved", "bm25", "rrf")}
+    rand = Counter()
+    cover = Counter()
+    hit3_original, hit3_rrf = [], []
+    n_span = 0
+    for q, (pool, meta) in zip(qs, build_x()):
         lpool, _ = legacy_pool(q["wiki_retrieval"], q["google_retrieval"])
-        agg["legacy_candidates"] += len(lpool)
-        agg["x_candidates"] += meta["candidates"]
+        spec_pool, _ = build_pool(q["question"], q["wiki_retrieval"], q["google_retrieval"], w=wiki_k, g=google_k,
+                                  dedup=False, rrf=False)
+        agg["original_passages"] += len(lpool)
+        agg["specified_passages"] += len(spec_pool)
+        agg["x_passages"] += len(pool)
         agg["dups_removed"] += meta["duplicates_removed"]
         agg["questions_with_dups"] += 1 if meta["duplicates_removed"] else 0
-        agg["x_pool_size"] += len(pool)
-        agg["legacy_tokens"] += sum(count_tokens(p["contents"]) for p in lpool)
-        agg["x_tokens"] += sum(count_tokens(p["contents"]) for p in pool)
-        agg["x_nodedup_tokens"] += sum(count_tokens(p["contents"]) for p in lpool if p["source_rank"] <= (wiki_k if p["source"] == "wiki" else google_k))
-        if extractive:
-            answers = q["answer"] if isinstance(q["answer"], list) else [q["answer"]]
-            ranks["source_order"].append(first_hit_rank([p["contents"] for p in sorted(pool, key=lambda p: p["concat_rank"])], answers))
-            ranks["bm25_only"].append(first_hit_rank([p["contents"] for p in sorted(pool, key=lambda p: p["bm25_rank"])], answers))
-            ranks["rrf"].append(first_hit_rank([p["contents"] for p in pool], answers))
-            ranks["legacy_15"].append(first_hit_rank([p["contents"] for p in lpool], answers))
+        agg["original_listing_tokens"] += count_tokens(format_evidence_pool(lpool))
+        agg["specified_listing_tokens"] += count_tokens(format_evidence_pool(spec_pool))
+        agg["x_listing_tokens"] += count_tokens(format_evidence_pool(pool))
 
-    n = len(indices)
-    return {
+        answers = _answers(q)
+        if not extractive or not has_span_answer(answers):
+            continue
+        n_span += 1
+        n_hits = sum(1 for p in pool if passage_contains_any(p["contents"], answers))
+        orders = {
+            "original": lpool,
+            "specified": spec_pool,
+            "interleaved": sorted(pool, key=lambda p: (p["source_rank"], 0 if p["source"] == "wiki" else 1)),
+            "bm25": sorted(pool, key=lambda p: p["bm25_rank"]),
+            "rrf": pool,
+        }
+        for name, ordered in orders.items():
+            ranks[name].append(first_hit_rank([p["contents"] for p in ordered], answers))
+        for k in (1, 3, 5):
+            rand["cov@{}".format(k)] += expected_random_coverage(len(pool), n_hits, k)
+        rand["mrr"] += expected_random_reciprocal_rank(len(pool), n_hits)
+        cover["original"] += 1 if ranks["original"][-1] is not None else 0
+        cover["specified"] += 1 if ranks["specified"][-1] is not None else 0
+        cover["x"] += 1 if n_hits > 0 else 0
+        hit3_original.append(1 if (ranks["original"][-1] or 99) <= 3 else 0)
+        hit3_rrf.append(1 if (ranks["rrf"][-1] or 99) <= 3 else 0)
+
+    out = {
         "n": n,
         "task_type": task_type(dataset_name),
-        "avg_legacy_candidates": agg["legacy_candidates"] / n,
-        "avg_x_candidates": agg["x_candidates"] / n,
+        "tokenizer": tokenizer_name(),
+        "passages": {"original": agg["original_passages"] / n, "specified": agg["specified_passages"] / n,
+                     "x": agg["x_passages"] / n},
+        "listing_tokens": {"original": agg["original_listing_tokens"] / n,
+                           "specified": agg["specified_listing_tokens"] / n,
+                           "x": agg["x_listing_tokens"] / n,
+                           "reduction_pct": (100.0 * (1.0 - agg["x_listing_tokens"] / agg["original_listing_tokens"])
+                                             if agg["original_listing_tokens"] else 0.0)},
         "duplicates_removed": agg["dups_removed"],
         "questions_with_duplicates": agg["questions_with_dups"],
-        "avg_x_pool_size": agg["x_pool_size"] / n,
-        "avg_legacy_tokens": agg["legacy_tokens"] / n,
-        "avg_x_nodedup_tokens": agg["x_nodedup_tokens"] / n,
-        "avg_x_tokens": agg["x_tokens"] / n,
-        "token_reduction_pct": 100.0 * (1.0 - agg["x_tokens"] / agg["legacy_tokens"]) if agg["legacy_tokens"] else 0.0,
-        "build_time_sec": build_time,
-        "build_time_ms_per_q": 1000.0 * build_time / n,
-        "peak_memory_kb": peak / 1024.0,
-        "tokenizer": tokenizer_name(),
-        "ordering": {k: coverage_and_mrr(v) for k, v in ranks.items()} if extractive else None,
+        "cost": cost,
+        "n_span": n_span if extractive else 0,
+        "n_verdict_gold": (n - n_span) if extractive else n,
+        "coverage_pct": None, "ordering": None, "paired_cov3": None,
     }
+    if extractive and n_span:
+        out["coverage_pct"] = {k: 100.0 * cover[k] / n_span for k in ("original", "specified", "x")}
+        ordering = {name: coverage_and_mrr(r) for name, r in ranks.items()}
+        ordering["random"] = {"n": n_span, "cov@1": rand["cov@1"] / n_span, "cov@3": rand["cov@3"] / n_span,
+                              "cov@5": rand["cov@5"] / n_span, "mrr": rand["mrr"] / n_span,
+                              "any_hit": cover["x"] / n_span}
+        out["ordering"] = ordering
+        mc = paired_mcnemar(hit3_original, hit3_rrf)
+        out["paired_cov3"] = {
+            "n": n_span, "original_only": mc["b_a_only"], "rrf_only": mc["c_b_only"],
+            "gain_pts": 100.0 * (sum(hit3_rrf) - sum(hit3_original)) / n_span,
+            "ci95": paired_difference_ci(hit3_original, hit3_rrf, n_boot=n_boot, seed=seed),
+            "p_value": mc["p_value"],
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Interface behaviour on canonical reply formats (deterministic)
+# ---------------------------------------------------------------------------
+
+# Each case is (name, reply): the reply is the text the parser receives.  The pool has ten passages.
+EVIDENCE_FORMAT_CASES = [
+    ("separate brackets", "[2], [0] and [7]"),
+    ("list in one bracket", "[2, 0, 7]"),
+    ("repeated identifier", "[2] is the key passage. Selection: [2] [0] [7]"),
+    ("passages discussed first, selection last", "[1] and [5] are off topic. Helpful: [2] [0] [7]"),
+    ("more than three listed", "[2] [0] [7] [1] [5]"),
+    ("identifier outside the pool", "[2] [0] [12]"),
+    ("lower-case not-found marker", "[3] is unrelated. [no found]"),
+]
+
+# Each case is (name, judge reply, verdict a reader would take from it).
+VERDICT_FORMAT_CASES = [
+    ("plain", "[Yes]", "yes"),
+    ("quoted", '["Yes"]', "yes"),
+    ("lower case", "[yes]", "yes"),
+    ("trailing punctuation", "[Yes.]", "yes"),
+    ("answers echoed before the verdict", "Agent 0: [Yes]. Agent 1: [No]. Inconsistent: [No]", "no"),
+]
+
+
+def interface_format_tables(pool_size=10, cap=3):
+    """Behaviour of the released parsers and of the MADKE-X parsers on canonical reply formats."""
+    evidence = []
+    for name, reply in EVIDENCE_FORMAT_CASES:
+        new = parse_evidence_ids(reply, pool_size, cap=cap)
+        old = parse_evidence_ids_legacy(reply, pool_size)
+        evidence.append({"format": name, "reply": reply, "pool_size": pool_size,
+                         "released_delivered": list(old.ids), "x_delivered": list(new.ids),
+                         "x_not_found": bool(new.not_found), "x_dropped": list(new.dropped),
+                         "x_ignored": list(new.ignored), "x_out_of_range": list(new.out_of_range),
+                         "same": list(old.ids) == list(new.ids)})
+    verdict = []
+    for name, reply, intended in VERDICT_FORMAT_CASES:
+        new = parse_judge_verdict(reply)
+        old = parse_judge_verdict_legacy(reply)
+        verdict.append({"format": name, "reply": reply, "intended": intended, "released": old, "x": new,
+                        "released_correct": old == intended, "x_correct": new == intended})
+    return {"evidence": evidence, "verdict": verdict}
+
+
+# ---------------------------------------------------------------------------
+# Verification stress test (scripted, offline)
+# ---------------------------------------------------------------------------
+
+def verification_stress(args, dataset_name, data, indices, bm25_index=None):
+    """Run MADKE-X with a careless scripted summariser that always cites the first listed passage.
+
+    Many first answers then fail the support check, so the bounded verification step is exercised
+    on a large share of the questions.  The counts describe the mechanism, not a language model.
+    """
+    cfg = madke_x_config(dataset_name, agent_num=args.agent_num, max_round=args.max_round,
+                         wiki_k=args.wiki_k, google_k=args.google_k, cap=args.cap, rrf_k=args.rrf_k)
+
+    def mk(name, **kw):
+        return ScriptedAgent(name, seed=args.seed, dataset_name=dataset_name, **kw)
+
+    agents = ([mk("Agent_{}".format(i)) for i in range(args.agent_num)], mk("Judge"), mk("Summarizer", cite_style="first"))
+    recs = run_records(data, indices, cfg, select_prompt(dataset_name), agents, bm25_index=bm25_index)
+    c = Counter()
+    for r in recs:
+        if not is_completed(r):
+            continue
+        tr = r["trace"]
+        ver = tr["verification"]
+        first_answer = extract_final_answer(r["Summary"])
+        if tr["initial_support_status"] == "not_applicable":
+            c["not_applicable"] += 1
+            continue
+        c["applicable"] += 1
+        if tr["initial_support_status"] == "supported":
+            c["initial_supported"] += 1
+            if r["final_answer"] != first_answer or ver.get("attempted"):
+                c["supported_answer_touched"] += 1          # must stay 0
+        if tr["support_status"] == "supported":
+            c["final_supported"] += 1
+        if ver.get("attempted"):
+            c["verification_calls"] += 1
+            if ver.get("adopted"):
+                c["adopted"] += 1
+                if normalize_text(ver.get("answer")) != normalize_text(first_answer):
+                    c["adopted_new_answer"] += 1
+            elif ver.get("abstained"):
+                c["abstained"] += 1
+            else:
+                c["rejected"] += 1
+    inv = check_invariants(recs, cfg, data, indices, bm25_index=bm25_index)
+    keys = ("applicable", "not_applicable", "initial_supported", "final_supported", "verification_calls", "adopted",
+            "adopted_new_answer", "abstained", "rejected", "supported_answer_touched")
+    out = {k: c[k] for k in keys}
+    out.update({"n": len(recs), "invariants_all_passed": inv["all_passed"],
+                "initial_support_rate": c["initial_supported"] / c["applicable"] if c["applicable"] else 0.0,
+                "final_support_rate": c["final_supported"] / c["applicable"] if c["applicable"] else 0.0})
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Invariants (MADKE-X records)
 # ---------------------------------------------------------------------------
 
-def _rebuild_pool(rec, cfg, data):
+def _rebuild_pool(rec, cfg, data, bm25_index=None):
     q = data[rec["index"]]
     if cfg.evidence_type == "no_evidence":
         return []
     if cfg.legacy:
         return legacy_pool(q["wiki_retrieval"], q["google_retrieval"], cfg.wiki_k, cfg.google_k)[0]
     return build_pool(q["question"], q["wiki_retrieval"], q["google_retrieval"], w=cfg.wiki_k, g=cfg.google_k,
-                      dedup=cfg.dedup, rrf=cfg.rrf, rrf_k=cfg.rrf_k)[0]
+                      bm25_index=bm25_index, dedup=cfg.dedup, rrf=cfg.rrf, rrf_k=cfg.rrf_k)[0]
 
 
 def inv_status(rec, cfg, pool):
@@ -387,8 +592,8 @@ def inv_citations_support(rec, cfg, pool):
         return False, "cited_valid_ids outside pool/union"
     if tr["support_status"] not in SUPPORT_STATUSES:
         return False, "unknown support status"
-    if cfg.task_type == "classification":
-        return (tr["support_status"] == "not_applicable", "classification task must be not_applicable")
+    if cfg.task_type == "classification" or is_verdict_answer(rec["final_answer"]):
+        return (tr["support_status"] == "not_applicable", "verdict answers must be not_applicable")
     expected = support_check(rec["final_answer"], tr["cited_valid_ids"], pool)
     if expected != tr["support_status"]:
         return False, "support status not reproducible ({} vs {})".format(expected, tr["support_status"])
@@ -404,7 +609,7 @@ def inv_verification(rec, cfg, pool):
     if calls > 1 or calls != int(bool(ver.get("attempted"))):
         return False, "verifier called {} times".format(calls)
     if ver.get("attempted"):
-        if not (cfg.verify and cfg.task_type == "extractive" and tr["initial_support_status"] != "supported"):
+        if not (cfg.verify and tr["initial_support_status"] not in ("supported", "not_applicable")):
             return False, "verification attempted without trigger"
         if ver.get("adopted"):
             if tr["support_status"] != "supported" or rec["final_answer"] != ver["answer"]:
@@ -448,10 +653,10 @@ INVARIANTS = [
 ]
 
 
-def check_invariants(records, cfg, data, indices):
+def check_invariants(records, cfg, data, indices, bm25_index=None):
     per = {name: {"checked": 0, "passed": 0, "failures": []} for name, _ in INVARIANTS}
     for rec in records:
-        pool = _rebuild_pool(rec, cfg, data)
+        pool = _rebuild_pool(rec, cfg, data, bm25_index)
         for name, fn in INVARIANTS:
             ok, detail = fn(rec, cfg, pool)
             per[name]["checked"] += 1
@@ -466,8 +671,7 @@ def check_invariants(records, cfg, data, indices):
     cons = compute_cons(records)["count"]
     co2 = compute_co2(records)["count"]
     manual_cons = sum(1 for r in completed if "yes" in r["trace"]["judge_verdicts"])
-    manual_co2 = sum(1 for r in completed if len(r["trace"]["judge_verdicts"]) >= 2
-                     and r["trace"]["judge_verdicts"][0] != "yes" and r["trace"]["judge_verdicts"][-1] == "yes")
+    manual_co2 = sum(1 for r in completed if "yes" in r["trace"]["judge_verdicts"] and is_correct(r))
     dataset_level["D2_cons_co2_consistent"] = (cons == manual_cons and co2 == manual_co2)
     dataset_level["D3_only_completed_scored"] = (compute_em_f1(records)["total"] == len(completed))
     n_checks = sum(v["checked"] for v in per.values()) + len(dataset_level)
@@ -486,6 +690,10 @@ def config_metrics(records, cfg, data, n_boot, seed):
     cons = compute_cons(records)
     co2 = compute_co2(records)
     cons_orig = compute_cons_original(records, max_round=cfg.max_round)
+    co2_orig = compute_co2_original(records, max_round=cfg.max_round)
+    cons_true = compute_cons(records, robust=True)      # what the judge replies say, read robustly
+    co2_true = compute_co2(records, robust=True)
+    late = compute_late_agreement(records)
     supp = support_statistics(records)
     ver = verification_statistics(records)
 
@@ -507,12 +715,28 @@ def config_metrics(records, cfg, data, n_boot, seed):
                 diag["with_out_of_range"] += 1 if a["out_of_range_ids"] else 0
                 diag["with_ignored"] += 1 if a["ignored_ids"] else 0
                 diag["not_found"] += 1 if a["not_found"] else 0
+                if a.get("intended_ids") is not None:   # scripted agents state the selection they mean
+                    diag["intent_replies"] += 1
+                    diag["delivered_set_ok"] += 1 if set(a["selected_ids"]) == set(a["intended_ids"]) else 0
+                    diag["delivered_exact_ok"] += 1 if list(a["selected_ids"]) == list(a["intended_ids"]) else 0
             if rt.get("judge_verdict_robust") is not None:
                 diag["judge_replies"] += 1
                 if rt["judge_verdict_robust"] == "unparsed":
                     diag["judge_unparsed"] += 1
+                if rt["judge_verdict_robust"] == "yes":
+                    diag["judge_yes_robust"] += 1
                 if rt["judge_verdict_robust"] == "yes" and rt["judge_verdict_legacy"] != "yes":
                     diag["judge_agreement_missed_by_legacy"] += 1
+                if rt["judge_verdict_robust"] != "yes" and rt["judge_verdict_legacy"] == "yes":
+                    diag["judge_false_agreement_legacy"] += 1
+        # did the debate stop in the round in which the judge reply first states agreement
+        # (robust reading of the recorded replies), or in the last round if it never does?
+        robust = [rt.get("judge_verdict_robust") for rt in tr["rounds"] if rt.get("judge_verdict_robust") is not None]
+        if is_completed(rec) and robust:
+            diag["debates"] += 1
+            first_yes = next((i + 1 for i, v in enumerate(robust) if v == "yes"), None)
+            if len(robust) == (first_yes if first_yes is not None else cfg.max_round):
+                diag["stopped_at_agreement_round"] += 1
         # re-parse the recorded evidence replies with both parsers
         for key in (k for k in rec if re.fullmatch(r"Round_\d+", k)):
             for ck, reply in rec[key].items():
@@ -540,6 +764,10 @@ def config_metrics(records, cfg, data, n_boot, seed):
         "cons": cons["cons"], "cons_count": cons["count"],
         "cons_original_formula": cons_orig["cons_original"], "cons_original_count": cons_orig["count"],
         "co2": co2["co2"], "co2_count": co2["count"],
+        "cons_robust": cons_true["cons"], "cons_robust_count": cons_true["count"],
+        "co2_robust": co2_true["co2"], "co2_robust_count": co2_true["count"],
+        "co2_original_formula": co2_orig["co2_original"], "co2_original_count": co2_orig["count"],
+        "late_agreement": late["late_agreement"], "late_agreement_count": late["count"],
         "avg_rounds": average_rounds(records),
         "stop_round_distribution": {str(k): v for k, v in sorted(stop_dist.items())},
         "support": supp, "verification": ver,
@@ -572,48 +800,70 @@ def render_tables(results, title, n_label):
             m = results[d][key]
             dg = m["diagnostics"]
             rows.append([d, m["system"], m["n"], m["n_completed"], m["n_failed"], dg.get("scored_despite_failed_call", 0),
-                         dg.get("binding_ok", 0), dg.get("evidence_replies", 0), dg.get("with_dropped", 0),
-                         dg.get("with_out_of_range", 0), dg.get("not_found", 0),
+                         dg.get("binding_ok", 0), dg.get("evidence_replies", 0),
+                         dg.get("delivered_set_ok", 0) if dg.get("intent_replies") else "-",
+                         dg.get("delivered_exact_ok", 0) if dg.get("intent_replies") else "-",
+                         dg.get("with_dropped", 0), dg.get("with_out_of_range", 0), dg.get("not_found", 0),
                          dg.get("parser_order_only", 0), dg.get("parser_disagreement", 0) - dg.get("parser_order_only", 0),
-                         dg.get("judge_replies", 0), dg.get("judge_agreement_missed_by_legacy", 0), dg.get("judge_unparsed", 0)])
+                         dg.get("judge_replies", 0), dg.get("judge_yes_robust", 0), dg.get("judge_agreement_missed_by_legacy", 0),
+                         dg.get("judge_false_agreement_legacy", 0), dg.get("stopped_at_agreement_round", 0),
+                         dg.get("judge_unparsed", 0)])
     out += ["### Table 3. Failure-aware interface layer (C1-C4, C7-C8)", "",
             md_table(["Dataset", "System", "Questions", "Completed", "Failed", "Scored despite failed call (C8)", "Summariser binding OK (C1)",
-                      "Evidence replies", "w/ dropped (>k)", "w/ out-of-range", "No Found", "Legacy parser: order differs (C3)",
-                      "Legacy parser: set differs (C3)", "Judge replies", "Agreements missed by legacy parser (C4)", "Unparsed verdicts"], rows), ""]
+                      "Evidence replies", "Delivered set = intended (C3)", "Delivered list = intended, in order (C3)",
+                      "w/ dropped (>k)", "w/ out-of-range", "No Found", "Released parser: order differs (C3)",
+                      "Released parser: set differs (C3)", "Judge replies", "Replies stating agreement",
+                      "Agreements missed by released parser (C4)", "False agreements of released parser (C4)",
+                      "Debates stopped at the agreement round", "Unparsed verdicts"], rows), ""]
 
     # Table 4 -- Cons / Co2
     rows = []
     for d in datasets:
         for key in ("legacy", "x"):
             m = results[d][key]
-            rows.append([d, m["system"], m["n_completed"], pct(m["cons_original_formula"]), pct(m["cons"]), pct(m["co2"]),
+            rows.append([d, m["system"], m["n_completed"], pct(m["cons_robust"]), pct(m["cons"]), pct(m["cons_original_formula"]),
+                         pct(m["co2_robust"]), pct(m["co2"]), pct(m["co2_original_formula"]), pct(m["late_agreement"]),
                          num(m["avg_rounds"]), json.dumps(m["stop_round_distribution"])])
-    out += ["### Table 4. Repaired consistency metrics (C5 `Cons`, C6 `Co2`)", "",
-            md_table(["Dataset", "System", "Completed", "Cons (original formula)", "Cons (repaired)", "Co2", "Avg rounds", "Stop-round distribution"], rows), ""]
+    out += ["### Table 4. Debate statistics `Cons` (consistency ratio) and `Co2` (consistent and correct ratio; correct = exact match) (C5, C6)", "",
+            md_table(["Dataset", "System", "Completed", "Cons: judge replies read robustly", "Cons: pipeline verdicts",
+                      "Cons: release formula", "Co2: judge replies read robustly", "Co2: pipeline verdicts", "Co2: release formula",
+                      "Agreement after round 1", "Avg rounds", "Stop-round distribution"], rows), ""]
 
     # Table 5 -- pool
     rows = []
     for d in datasets:
         p = results[d]["pool"]
-        rows.append([d, num(p["avg_legacy_candidates"], 1), num(p["avg_x_candidates"], 1), p["duplicates_removed"], p["questions_with_duplicates"],
-                     num(p["avg_x_pool_size"], 2), num(p["avg_legacy_tokens"], 0), num(p["avg_x_tokens"], 0), num(p["token_reduction_pct"], 1),
-                     num(p["build_time_ms_per_q"], 3), num(p["peak_memory_kb"], 0)])
-    out += ["### Table 5. Evidence governor: 5+5 pool, de-duplication, cost (tokenizer: {})".format(results[datasets[0]]["pool"]["tokenizer"]), "",
-            md_table(["Dataset", "Legacy pool (10+5)", "Candidates (5+5)", "Duplicates removed", "Questions affected", "Final pool size",
-                      "Pool tokens (legacy)", "Pool tokens (MADKE-X)", "Token reduction %", "Build time ms/q", "Peak memory KB"], rows), ""]
+        cost = p.get("cost") or {}
+        cov = p.get("coverage_pct") or {}
+        rows.append([d, num(p["passages"]["original"], 2), num(p["passages"]["specified"], 2), num(p["passages"]["x"], 2),
+                     p["duplicates_removed"], p["questions_with_duplicates"],
+                     num(p["listing_tokens"]["original"], 0), num(p["listing_tokens"]["x"], 0),
+                     num(p["listing_tokens"]["reduction_pct"], 1),
+                     num(cov["original"], 1) if cov else "n/a", num(cov["x"], 1) if cov else "n/a",
+                     num(cost["original_build_ms_per_q"], 4) if cost else "-", num(cost["x_build_ms_per_q"], 3) if cost else "-",
+                     num(cost["x_peak_memory_kb"], 0) if cost else "-"])
+    out += ["### Table 5. Evidence governor: pool size, de-duplication, coverage, cost (tokenizer: {})".format(results[datasets[0]]["pool"]["tokenizer"]), "",
+            md_table(["Dataset", "Passages (10+5)", "Passages (5+5)", "Passages (MADKE-X)", "Duplicates removed", "Questions affected",
+                      "Listing tokens (10+5)", "Listing tokens (MADKE-X)", "Reduction %", "Coverage % (10+5)", "Coverage % (MADKE-X)",
+                      "Build ms/q (slice)", "Build ms/q (MADKE-X)", "Peak memory KB (MADKE-X)"], rows), ""]
 
     # Table 6 -- ordering
     rows = []
     for d in datasets:
-        o = results[d]["pool"]["ordering"]
+        p = results[d]["pool"]
+        o = p["ordering"]
         if o is None:
-            rows.append([d, "n/a (classification)", "-", "-", "-", "-"])
+            rows.append([d, "n/a (verdict labels)", "-", "-", "-", "-", "-"])
             continue
-        for name, lab in (("source_order", "source order (W then G)"), ("bm25_only", "BM25 only"), ("rrf", "RRF (rho + beta)"), ("legacy_15", "legacy 10+5 order")):
+        for name, lab in (("original", "original (wiki 10, then Google 5)"), ("interleaved", "interleaved"), ("bm25", "BM25 only"),
+                          ("rrf", "RRF (rho + beta)"), ("random", "random (expected)")):
             m = o[name]
-            rows.append([d, lab, pct(m["cov@1"]), pct(m["cov@3"]), pct(m["cov@5"]), num(m["mrr"], 3)])
-    out += ["### Table 6. Question-only BM25 + RRF ordering quality (gold answer lexically present in top-k)", "",
-            md_table(["Dataset", "Ordering", "cov@1", "cov@3", "cov@5", "MRR"], rows), ""]
+            rows.append([d, lab, p["n_span"], pct(m["cov@1"]), pct(m["cov@3"]), pct(m["cov@5"]), num(m["mrr"], 3)])
+        pc = p["paired_cov3"]
+        rows.append([d, "paired cov@3, RRF vs original: +{} pts {} (RRF only {}, original only {}, McNemar p {})".format(
+            num(pc["gain_pts"], 1), ci(pc["ci95"]), pc["rrf_only"], pc["original_only"], "{:.2g}".format(pc["p_value"])), "", "", "", "", ""])
+    out += ["### Table 6. Question-only BM25 + RRF ordering quality (gold answer present, as whole words, in the first k passages)", "",
+            md_table(["Dataset", "Ordering", "n", "cov@1", "cov@3", "cov@5", "MRR"], rows), ""]
 
     # Table 7 -- trace / support
     rows = []
@@ -686,7 +936,7 @@ def render_table10(results, tag):
 # Main flows
 # ---------------------------------------------------------------------------
 
-def dataset_results(args, dataset_name, data, indices, out_dir, checkpoint=False):
+def dataset_results(args, dataset_name, data, indices, out_dir, checkpoint=False, bm25_index=None):
     prompt = select_prompt(dataset_name)
     cfgs = {}
     if args.configs in ("both", "legacy"):
@@ -701,7 +951,8 @@ def dataset_results(args, dataset_name, data, indices, out_dir, checkpoint=False
         t0 = time.time()
         recs = run_records(data, indices, cfg, prompt, agents, checkpoint=ckpt, concurrency=args.concurrency,
                            retry_failed=args.retry_failed, label="{}/{}".format(dataset_name, cfg.name),
-                           max_consecutive_failures=(args.max_consecutive_failures if args.mode == "live" else 0))
+                           max_consecutive_failures=(args.max_consecutive_failures if args.mode == "live" else 0),
+                           bm25_index=bm25_index)
         log("{} {}: {} questions in {:.1f}s ({} failed)".format(dataset_name, cfg.name, len(recs), time.time() - t0,
                                                               sum(1 for r in recs if r["status"] == "failed")))
         write_json_data(os.path.join(out_dir, dataset_name, cfg.name + ".json"), recs, verbose=False)
@@ -709,7 +960,7 @@ def dataset_results(args, dataset_name, data, indices, out_dir, checkpoint=False
     return records
 
 
-def summarise(args, dataset_name, data, indices, records, pool_stats, out_dir, subset=None):
+def summarise(args, dataset_name, data, indices, records, pool_stats, out_dir, subset=None, bm25_index=None):
     res = {}
     sub = (lambda recs: [r for r in recs if r["index"] in subset]) if subset is not None else (lambda recs: recs)
     for key, (cfg, recs) in records.items():
@@ -721,7 +972,7 @@ def summarise(args, dataset_name, data, indices, records, pool_stats, out_dir, s
     res["pool"] = pool_stats
     x_cfg, x_recs = records.get("x", records.get("legacy"))
     inv_indices = [i for i in indices if subset is None or i in subset]
-    res["invariants"] = check_invariants(sub(x_recs), x_cfg, data, inv_indices)
+    res["invariants"] = check_invariants(sub(x_recs), x_cfg, data, inv_indices, bm25_index=bm25_index)
     return res
 
 
@@ -751,6 +1002,8 @@ def main(argv=None):
     parser.add_argument("--fail_demo", type=int, default=100,
                         help="Offline: questions per dataset for the injected-failure demonstration (0 disables).")
     parser.add_argument("--fail_demo_rate", type=float, default=0.02, help="Per-call failure rate of that demonstration.")
+    parser.add_argument("--no_stress", dest="stress", action="store_false",
+                        help="Offline: skip the verification stress test (careless scripted summariser).")
     add_agent_backend_args(parser)
     parser.set_defaults(mode="offline")
     args = parser.parse_args(argv)
@@ -784,26 +1037,34 @@ def _run(args):
     for name, c in checks.items():
         log("SHA-256 {:<15} {}".format(name, "OK" if c["ok"] else "MISMATCH"))
 
-    all_results, subset_results, fail_demo = {}, {}, {}
+    all_results, subset_results, fail_demo, stress = {}, {}, {}, {}
     for dataset_name in args.datasets:
         data = load_dataset(dataset_name, args.data_root, verify=False)
         end = min(args.end_index, len(data))
         indices = list(range(args.start_index, end))
         log("=== {} : {} questions [{}:{}] ===".format(dataset_name, len(indices), args.start_index, end))
 
-        pool_stats = pool_analysis(dataset_name, data, indices, args.wiki_k, args.google_k, args.rrf_k)
+        # reference statistics over the whole file, independent of the evaluated index range
+        bm25_index = build_bm25_index(data, args.wiki_k, args.google_k)
+        pool_stats = pool_analysis(dataset_name, data, indices, args.wiki_k, args.google_k, args.rrf_k,
+                                   n_boot=args.n_boot, seed=args.seed, timing=(args.mode == "offline"),
+                                   bm25_index=bm25_index)
         write_json_data(os.path.join(out_dir, dataset_name, "pool_analysis.json"), pool_stats, verbose=False)
 
-        records = dataset_results(args, dataset_name, data, indices, out_dir, checkpoint=(args.mode == "live"))
-        all_results[dataset_name] = summarise(args, dataset_name, data, indices, records, pool_stats, out_dir)
+        records = dataset_results(args, dataset_name, data, indices, out_dir, checkpoint=(args.mode == "live"),
+                                  bm25_index=bm25_index)
+        all_results[dataset_name] = summarise(args, dataset_name, data, indices, records, pool_stats, out_dir,
+                                              bm25_index=bm25_index)
         write_json_data(os.path.join(out_dir, dataset_name, "invariants.json"), all_results[dataset_name]["invariants"], verbose=False)
         inv = all_results[dataset_name]["invariants"]
         log("{} invariants: {}/{} passed -> {}".format(dataset_name, inv["n_passed"], inv["n_checks"], "PASS" if inv["all_passed"] else "FAIL"))
 
         if args.mode == "offline" and args.subset and args.subset < len(indices):
             sub_idx = set(indices[:args.subset])
-            sub_pool = pool_analysis(dataset_name, data, indices[:args.subset], args.wiki_k, args.google_k, args.rrf_k)
-            subset_results[dataset_name] = summarise(args, dataset_name, data, indices, records, sub_pool, out_dir, subset=sub_idx)
+            sub_pool = pool_analysis(dataset_name, data, indices[:args.subset], args.wiki_k, args.google_k, args.rrf_k,
+                                     n_boot=args.n_boot, seed=args.seed, timing=False, bm25_index=bm25_index)
+            subset_results[dataset_name] = summarise(args, dataset_name, data, indices, records, sub_pool, out_dir,
+                                                     subset=sub_idx, bm25_index=bm25_index)
 
         if args.mode == "offline" and args.fail_demo:
             demo_idx = indices[:args.fail_demo]
@@ -813,18 +1074,31 @@ def _run(args):
                 agents = [ScriptedAgent("Agent_{}".format(i), seed=args.seed, fail_rate=fr, dataset_name=dataset_name) for i in range(args.agent_num)]
                 judge = ScriptedAgent("Judge", seed=args.seed, fail_rate=fr, dataset_name=dataset_name)
                 summ = ScriptedAgent("Summarizer", seed=args.seed, fail_rate=fr, dataset_name=dataset_name)
-                recs = run_records(data, demo_idx, cfg, select_prompt(dataset_name), (agents, judge, summ))
+                recs = run_records(data, demo_idx, cfg, select_prompt(dataset_name), (agents, judge, summ),
+                                   bm25_index=bm25_index)
                 m = config_metrics(recs, cfg, data, 200, args.seed)
                 demo[key] = {"system": m["system"], "n": m["n"], "n_failed": m["n_failed"], "n_completed": m["n_completed"],
                              "scored_despite_failed_call": m["diagnostics"].get("scored_despite_failed_call", 0),
                              "exact_over_completed": m["exact"], "fail_rate": fr}
             fail_demo[dataset_name] = demo
 
+        if args.mode == "offline" and args.stress and task_type(dataset_name) == "extractive":
+            stress[dataset_name] = verification_stress(args, dataset_name, data, indices, bm25_index=bm25_index)
+            st = stress[dataset_name]
+            log("{} verification stress: support {:.1f}% -> {:.1f}% ({} calls, {} adopted, {} supported answers touched)".format(
+                dataset_name, 100 * st["initial_support_rate"], 100 * st["final_support_rate"], st["verification_calls"],
+                st["adopted"], st["supported_answer_touched"]))
+
     # 3. write tables
-    tables = {"mode": args.mode, "args": vars(args), "elapsed_sec": time.time() - t_start, "full": all_results}
+    tables = {"mode": args.mode, "code_version": CODE_VERSION, "args": vars(args),
+              "environment": {"python": platform.python_version(), "platform": platform.platform(),
+                              "processor": platform.processor(), "tokenizer": tokenizer_name()},
+              "elapsed_sec": time.time() - t_start, "full": all_results}
     if args.mode == "offline":
         tables["subset_{}".format(args.subset)] = subset_results
         tables["failure_injection_demo"] = fail_demo
+        tables["verification_stress"] = stress
+        tables["interface_formats"] = interface_format_tables(cap=args.cap)
         md = ["# MADKE-X offline verification tables", "",
               "Generated by `python run_experiments.py --mode offline` with deterministic scripted agents (seed {}). "
               "EM/F1 here characterise the *pipeline*, not an LLM; see Table 10 for live results.".format(args.seed), "",
@@ -839,6 +1113,22 @@ def _run(args):
                     rows.append([d, m["system"], m["n"], m["n_completed"], m["n_failed"], m["scored_despite_failed_call"], num(m["exact_over_completed"], 1)])
             md += ["## Failure injection demonstration (C7/C8): scripted agents with a {:.0%} per-call failure rate".format(args.fail_demo_rate), "",
                    md_table(["Dataset", "System", "Questions", "Completed", "Marked failed (C8)", "Scored despite failed call(s)", "EM over completed"], rows), ""]
+        if stress:
+            rows = [[d, st["applicable"], st["not_applicable"], pct(st["initial_support_rate"]), st["verification_calls"], st["adopted"],
+                     st["adopted_new_answer"], st["abstained"], st["rejected"], pct(st["final_support_rate"]), st["supported_answer_touched"]]
+                    for d, st in stress.items()]
+            md += ["## Verification stress test: careless scripted summariser (always cites the first listed passage)", "",
+                   md_table(["Dataset", "Applicable", "Verdict answers (n/a)", "Supported before", "Verification calls", "Adopted",
+                             "of which new answer", "Abstained", "Rejected", "Supported after", "Supported answers touched"], rows), ""]
+        fmt = tables["interface_formats"]
+        md += ["## Parser behaviour on canonical reply formats", "",
+               md_table(["Reply format", "Reply", "Released parser delivers", "MADKE-X delivers", "MADKE-X records"],
+                        [[e["format"], "`{}`".format(e["reply"]), e["released_delivered"] or "nothing",
+                          ("not found" if e["x_not_found"] else e["x_delivered"]),
+                          "dropped {} / ignored {} / out-of-range {}".format(e["x_dropped"], e["x_ignored"], e["x_out_of_range"])]
+                         for e in fmt["evidence"]]), "",
+               md_table(["Verdict format", "Judge reply", "Intended", "Released parser", "MADKE-X parser"],
+                        [[v["format"], "`{}`".format(v["reply"]), v["intended"], v["released"], v["x"]] for v in fmt["verdict"]]), ""]
         write_text(os.path.join(out_dir, "TABLES.md"), "\n".join(md))
         write_json_data(os.path.join(out_dir, "tables.json"), tables, verbose=False)
         all_pass = all(r["invariants"]["all_passed"] for r in all_results.values())

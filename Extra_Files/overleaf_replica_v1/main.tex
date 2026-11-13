@@ -1,0 +1,65 @@
+%% MADKE-X manuscript — Elsevier elsarticle template.
+%% Faithful reproduction of the current draft (Extra_Files/MADKE-X.pdf); revisions are applied step by step.
+%% Compile: pdflatex -> bibtex -> pdflatex -> pdflatex (VS Code LaTeX Workshop does this on save;
+%% Overleaf does it automatically).
+\documentclass[preprint,12pt]{elsarticle}
+
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{siunitx}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{figures/}}
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+
+%% Shorthands
+\newcommand{\madke}{MADKE}
+\newcommand{\madkex}{MADKE-X}
+
+\journal{Expert Systems with Applications}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{MADKE-X: Traceable, Evidence-Governed Multi-Agent Debate for Knowledge-Intensive Question Answering}
+
+\author[iu]{Muhammad Ali}
+\author[iu]{Muhammad Talha}
+\affiliation[iu]{organization={Department of Computer Science, Iqra University, Airport Campus},
+            city={Karachi},
+            country={Pakistan}}
+
+\input{sections/00_abstract}
+
+\begin{keyword}
+multi-agent debate \sep large language models \sep retrieval-augmented generation \sep
+explainable agentic AI \sep evidence attribution \sep question answering
+\end{keyword}
+
+\end{frontmatter}
+
+\input{sections/01_introduction}
+\input{sections/02_related_work}
+\input{sections/03_baseline}
+\input{sections/04_method}
+\input{sections/05_complexity}
+\input{sections/06_experimental_design}
+\input{sections/07_results_offline}
+\input{sections/08_results_live}
+\input{sections/09_discussion}
+\input{sections/10_threats}
+\input{sections/11_conclusion}
+\input{sections/12_declarations}
+
+\bibliographystyle{elsarticle-num}
+\bibliography{references}
+
+\end{document}

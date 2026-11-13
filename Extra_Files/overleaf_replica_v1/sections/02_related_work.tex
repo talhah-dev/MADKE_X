@@ -1,0 +1,10 @@
+\section{Related work}
+\label{sec:related_work}
+
+\paragraph{Multi-agent debate} Du et al.~\cite{du2024debate} showed that debate improves factuality and reasoning, Liang et al.~\cite{liang2024divergent} introduced a judge and adaptive stopping to encourage divergent thinking, and Smit et al.~\cite{smit2024mad} found that debate strategies are sensitive to hyper-parameters and often no better than simpler ensembles. MADKE sits in this line and adds retrieval.
+
+\paragraph{Retrieval-augmented reasoning} Retrieval-augmented generation \cite{lewis2020rag} conditions generation on retrieved passages, with dense retrievers \cite{karpukhin2020dpr}; IRCoT \cite{trivedi2023ircot} interleaves retrieval with reasoning for multi-hop questions, and Self-RAG \cite{asai2024selfrag} lets the model critique its own retrieval. Models use long contexts unevenly \cite{liu2024lost}, which makes the order in which passages are shown matter. Rank fusion \cite{cormack2009rrf} and BM25 \cite{robertson2009bm25} are standard, label-free ways to order candidates.
+
+\paragraph{Attribution and explanation} ALCE \cite{gao2023alce} trains and evaluates models to cite their sources, and attribution can be measured against human or model judgements \cite{rashkin2023attribution}. A faithful explanation must reflect the actual reasoning process \cite{jacovi2020faithful}. MADKE-X provides a recorded trace of what the system actually did and a cheap lexical check, not a faithfulness guarantee.
+
+\paragraph{Reproducible evaluation} Reproducibility checklists \cite{pineau2021reproducibility} and significance testing practice in NLP \cite{dror2018hitchhiker} motivate our use of paired tests \cite{mcnemar1947}, bootstrap intervals \cite{efron1979bootstrap}, power analysis \cite{cohen1988power} and multiplicity correction \cite{holm1979}.

@@ -175,6 +175,11 @@ EvidenceParse = namedtuple("EvidenceParse", ["ids", "not_found", "ignored", "dro
 def parse_evidence_ids(reply, pool_size, cap=3):
     """Parse evidence ids from an agent reply (Algorithm 1).
 
+    The selection is read as the *final statement* of the reply, the convention the
+    pipeline also uses for answers (last ``[answer]`` group) and judge verdicts (last
+    ``[Yes]`` / ``[No]`` group).  The selection prompt asks the agent to reason step by
+    step, so passages may be mentioned in brackets before the selection is stated.
+
     Parameters
     ----------
     reply : str
@@ -187,16 +192,21 @@ def parse_evidence_ids(reply, pool_size, cap=3):
     Returns
     -------
     EvidenceParse(ids, not_found, ignored, dropped, out_of_range)
-        * ``ids``          -- ``I[:k]``: in-range, de-duplicated ids in written order
+        * ``ids``          -- the LAST ``k`` distinct in-range ids of the reply, in written
+                              order (each id at the position of its last occurrence)
         * ``not_found``    -- ``True`` iff any bracket group matches ``no[- ]?found``
-        * ``ignored``      -- the in-range ids ``I`` when ``not_found`` is set (else ``[]``)
-        * ``dropped``      -- ``I[k:]`` (ids beyond the cap)
+        * ``ignored``      -- the distinct in-range ids when ``not_found`` is set (else ``[]``)
+        * ``dropped``      -- distinct in-range ids mentioned before the kept ones (beyond the cap)
         * ``out_of_range`` -- integers outside ``[0, pool_size)`` in written order
+
+    For every reply the released parser can read (groups that hold exactly one integer,
+    ``[No Found]`` spelled exactly so) the delivered SET is the one the release delivers;
+    the delivered ORDER is the written order instead of its reverse.
     """
     groups = bracket_groups(reply)
     not_found = False
-    in_range, out_of_range = [], []
-    seen_in, seen_out = set(), set()
+    mentions, out_of_range = [], []
+    seen_out = set()
 
     for group in groups:
         if NO_FOUND_RE.search(group):
@@ -205,17 +215,24 @@ def parse_evidence_ids(reply, pool_size, cap=3):
         for tok in INT_RE.findall(group):
             n = int(tok)
             if 0 <= n < pool_size:
-                if n not in seen_in:
-                    seen_in.add(n)
-                    in_range.append(n)
-            else:
-                if n not in seen_out:
-                    seen_out.add(n)
-                    out_of_range.append(n)
+                mentions.append(n)
+            elif n not in seen_out:
+                seen_out.add(n)
+                out_of_range.append(n)
+
+    # distinct in-range ids, ordered by the position of their LAST occurrence
+    distinct, seen = [], set()
+    for n in reversed(mentions):
+        if n not in seen:
+            seen.add(n)
+            distinct.append(n)
+    distinct.reverse()
 
     if not_found:
-        return EvidenceParse([], True, list(in_range), [], out_of_range)
-    return EvidenceParse(in_range[:cap], False, [], in_range[cap:], out_of_range)
+        return EvidenceParse([], True, distinct, [], out_of_range)
+    cap = max(int(cap), 0)
+    cut = max(len(distinct) - cap, 0)
+    return EvidenceParse(distinct[cut:], False, [], distinct[:cut], out_of_range)
 
 
 def parse_evidence_ids_legacy(reply, pool_size):
@@ -296,6 +313,28 @@ def parse_citations(reply):
 
 SUPPORT_STATUSES = ("supported", "cited_but_answer_not_found", "no_citation", "empty_answer", "not_applicable")
 
+# Answers that are verdicts rather than answer spans.  A verdict never occurs in a
+# passage as the statement of an answer, so the lexical support check (and every
+# coverage measure built on answer strings) is not applicable to them.
+VERDICT_ANSWERS = ("yes", "no", "supports", "refutes", "not enough info")
+
+
+def contains_phrase(norm_phrase, norm_text):
+    """True iff ``norm_phrase`` occurs in ``norm_text`` as a sequence of WHOLE words.
+
+    Both arguments must already be normalised with :func:`normalize_text` (words
+    separated by single spaces).  Whole-word matching prevents accidental hits
+    such as ``"paris"`` inside ``"comparison"`` or ``"5"`` inside ``"1957"``.
+    """
+    if not norm_phrase:
+        return False
+    return (" " + norm_phrase + " ") in (" " + norm_text + " ")
+
+
+def is_verdict_answer(answer):
+    """True iff the normalised answer is a verdict (yes / no / FEVER label), not an answer span."""
+    return normalize_text(answer) in VERDICT_ANSWERS
+
 
 def _passage_text(passage):
     if isinstance(passage, dict):
@@ -309,9 +348,13 @@ def support_check(answer, cited_ids, pool):
     Returns one of
       * ``"empty_answer"``               -- normalised ``answer`` is empty
       * ``"no_citation"``                -- ``cited_ids`` is empty
-      * ``"supported"``                  -- normalised answer is a substring of the
-                                            normalised text of at least one cited passage
+      * ``"supported"``                  -- the normalised answer occurs, as a sequence of
+                                            whole words, in the normalised text of at least
+                                            one cited passage
       * ``"cited_but_answer_not_found"`` -- otherwise
+
+    Verdict answers (``is_verdict_answer``) are reported as ``"not_applicable"`` by
+    the caller (``debate.run_debate``); this function itself is purely lexical.
     """
     norm_answer = normalize_text(answer)
     if not norm_answer:
@@ -319,6 +362,6 @@ def support_check(answer, cited_ids, pool):
     if not cited_ids:
         return "no_citation"
     for i in cited_ids:
-        if 0 <= i < len(pool) and norm_answer in normalize_text(_passage_text(pool[i])):
+        if 0 <= i < len(pool) and contains_phrase(norm_answer, normalize_text(_passage_text(pool[i]))):
             return "supported"
     return "cited_but_answer_not_found"

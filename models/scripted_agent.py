@@ -9,9 +9,13 @@ failure handling and metric computation -- without any LLM or API key.
 
 It is NOT a model of LLM quality: EM/F1 obtained offline characterise the
 pipeline, not an LLM.  Replies are made deliberately *messy* in a seeded,
-reproducible way (duplicate ids, out-of-range ids, more than three ids,
-quoted / lower-case verdicts, ``[no-found]`` variants) so that the robustness
-of the interface layer is measurable (Tables 3-9).
+reproducible way (repeated ids, out-of-range ids, passages discussed before the
+selection, a list written in one bracket, quoted / lower-case verdicts,
+``[no-found]`` variants) so that the robustness of the interface layer is
+measurable (Tables 3-9).  Selection replies follow the convention of the prompts:
+reasoning first, the selection last.  The selection the script means to make is
+returned in ``AgentResult.meta['intended_ids']``, which gives the parsers a
+ground truth.
 
 Determinism: every decision is drawn from ``random.Random(sha256(seed|agent|prompt))``.
 """
@@ -21,7 +25,7 @@ import random
 import re
 
 from models.base import AgentResult, BaseAgent
-from utils.evaluation_utils import bracket_groups, extract_final_answer, normalize_text
+from utils.evaluation_utils import bracket_groups, contains_phrase, extract_final_answer, normalize_text
 from utils.data_utils import tokenize
 
 STOPWORDS = set("""a an the of in on at to for from by with and or is are was were be been being who whom whose which
@@ -56,9 +60,14 @@ def _content_tokens(text):
 
 
 def _parse_listed_passages(text, line_re):
+    """Passages listed for the CURRENT question (the part of the prompt after the worked example)."""
     passages = []
-    for line in (text or "").split("\n"):
-        m = line_re.match(line.strip())
+    text = (text or "").rsplit("(END OF EXAMPLE)", 1)[-1]
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith("Evidence:"):      # the first passage shares its line with the "Evidence:" label
+            line = line[len("Evidence:"):].strip()
+        m = line_re.match(line)
         if m:
             passages.append((int(m.group(1)), m.group(2).strip()))
     return passages
@@ -101,13 +110,21 @@ def _candidate_spans(text):
 
 
 class ScriptedAgent(BaseAgent):
-    def __init__(self, name="Agent", seed=0, fail_rate=0.0, dataset_name="triviaqa", messy=True):
+    def __init__(self, name="Agent", seed=0, fail_rate=0.0, dataset_name="triviaqa", messy=True,
+                 cite_style="grounded"):
+        """``cite_style`` controls the scripted summariser when citations are requested:
+
+        * ``"grounded"`` (default) -- cites the listed passages that contain the answer;
+        * ``"first"``              -- always cites the first listed passage, whether or not it
+          contains the answer (a careless summariser, used to stress-test the verification step).
+        """
         super().__init__(name)
         self.seed = seed
         self.fail_rate = float(fail_rate or 0.0)
         self.dataset_name = dataset_name
         self.task_type = "classification" if dataset_name in ("fever", "feverous") else "extractive"
         self.messy = messy
+        self.cite_style = cite_style
         self.calls = 0
 
     # ------------------------------------------------------------------
@@ -123,8 +140,10 @@ class ScriptedAgent(BaseAgent):
             return AgentResult(ok=False, text="", error="injected failure (scripted agent, fail_rate={})".format(self.fail_rate), attempts=4)
 
         low = user.lower()
+        meta = {}
         if "select evidence from the evidence pool" in low:
-            text = self._choose_evidence(user, rng)
+            text, intended = self._choose_evidence(user, rng)
+            meta = {"intended_ids": intended}   # what the script means to select (ground truth for the parsers)
         elif "evaluate the consistency" in low:
             text = self._judge(user, rng)
         elif "verification step" in low:
@@ -135,7 +154,7 @@ class ScriptedAgent(BaseAgent):
             text = self._debate(user, rng)
         prompt_tokens = sum(len(tokenize(m.get("content", ""))) for m in messages)
         return AgentResult(ok=True, text=text, attempts=1,
-                           usage={"prompt_tokens": prompt_tokens, "completion_tokens": len(tokenize(text))})
+                           usage={"prompt_tokens": prompt_tokens, "completion_tokens": len(tokenize(text))}, meta=meta)
 
     # ------------------------------------------------------------------
     # Evidence selection
@@ -155,29 +174,36 @@ class ScriptedAgent(BaseAgent):
 
         if not helpful:
             variant = rng.choice(["[No Found]", "[no found]", "[No-Found]", "[NO FOUND]"]) if self.messy else "[No Found]"
+            if self.messy and passages:     # a passage that was looked at is mentioned before the marker
+                return ("Let's think step by step! Passage [{}] is on a different topic, and none of the other passages "
+                        "mention the entities of the question, so the evidence pool does not contain the information "
+                        "needed. {}".format(passages[0][0], variant)), []
             return ("Let's think step by step! None of the passages mention the entities of the question, "
-                    "so the evidence pool does not contain the information needed. {}".format(variant))
+                    "so the evidence pool does not contain the information needed. {}".format(variant)), []
 
         top = helpful[:3]
+        listed = " ".join("[{}]".format(i) for i in top)
         if not self.messy:
-            return "The most helpful evidence is {}.".format(", ".join("[{}]".format(i) for i in top))
+            return "The most helpful evidence is {}.".format(", ".join("[{}]".format(i) for i in top)), top
 
         style = rng.random()
         if style < 0.55:
             body = ", ".join("[{}]".format(i) for i in top)
-            return "Let's think step by step! The passages that mention the question entities are {}. These are the most helpful.".format(body)
-        if style < 0.70:  # duplicates
-            body = " ".join("[{}]".format(i) for i in top + top[:1])
-            return "Relevant evidence: {}. Passage [{}] is the most important one.".format(body, top[0])
-        if style < 0.82:  # more than three ids -> dropped
+            return ("Let's think step by step! The passages that mention the question entities are {}. "
+                    "These are the most helpful.".format(body)), top
+        if style < 0.70:  # the key passage is named first and repeated in the selection
+            return "Passage [{}] is the most important one. Relevant evidence: {}.".format(top[0], listed), top
+        if style < 0.82:  # other passages are discussed first, the selection comes last (more than three ids)
             extra = [idx for _, idx in scored if idx not in top][:2]
-            body = " ".join("[{}]".format(i) for i in top + extra)
-            return "Several passages help: {}.".format(body)
-        if style < 0.92:  # out-of-range id
+            if len(top) == 3 and extra:
+                return ("Passages {} mention the topic only in passing. The most helpful evidence is {}.".format(
+                    " and ".join("[{}]".format(i) for i in extra), listed)), top
+            return "The most helpful evidence is {}.".format(listed), top
+        if style < 0.92:  # an identifier outside the pool
             body = " ".join("[{}]".format(i) for i in top[:2] + [pool_size + rng.randint(0, 5)])
-            return "Useful evidence: {}.".format(body)
-        # comma-separated single group (legacy parser cannot read it)
-        return "The helpful passages are [{}].".format(", ".join(str(i) for i in top))
+            return "Useful evidence: {}.".format(body), top[:2]
+        # list written in one bracket (the released parser cannot read it)
+        return "The helpful passages are [{}].".format(", ".join(str(i) for i in top)), top
 
     # ------------------------------------------------------------------
     # Debater
@@ -207,7 +233,7 @@ class ScriptedAgent(BaseAgent):
                     # converge to the other agent when it holds the stronger (supported) label
                     if answer == "NOT ENOUGH INFO" and oa.upper() in ("SUPPORTS", "REFUTES"):
                         answer = oa.upper()
-                elif normalize_text(oa) and normalize_text(oa) in evidence_text:
+                elif contains_phrase(normalize_text(oa), evidence_text):
                     answer = oa  # the other agent's answer is grounded in my own evidence: adopt it
             if own_prev and not answer:
                 answer = own_prev
@@ -314,9 +340,14 @@ class ScriptedAgent(BaseAgent):
             text = "Let's think step by step! The agents did not provide a clear answer. Therefore, the final answer is []."
             return text + (" {E-none}" if cite_mode else "")
         reply = "Let's think step by step! Based on the agents' responses, the agents converge on the same answer. Therefore, the final answer is [{}].".format(answer)
-        if cite_mode:
+        if cite_mode and self.cite_style == "first":
+            if cite_passages:
+                reply += " Supporting evidence: {{E{}}}".format(cite_passages[0][0])   # careless citation
+            else:
+                reply += " {E-none}"
+        elif cite_mode:
             na = normalize_text(answer)
-            supporting = [i for i, t in cite_passages if na and na in normalize_text(t)]
+            supporting = [i for i, t in cite_passages if contains_phrase(na, normalize_text(t))]
             if supporting:
                 reply += " Supporting evidence: " + " ".join("{{E{}}}".format(i) for i in supporting[:2])
             elif cite_passages and rng.random() < 0.5:
@@ -335,7 +366,7 @@ class ScriptedAgent(BaseAgent):
                 candidates.append(ans)
         for cand in candidates:
             nc = normalize_text(cand)
-            hits = [i for i, t in passages if nc and nc in normalize_text(t)]
+            hits = [i for i, t in passages if contains_phrase(nc, normalize_text(t))]
             if hits:
                 return "Verification: passage {{E{}}} states the answer. Therefore, the final answer is [{}]. {{E{}}}".format(hits[0], cand, hits[0])
         # fall back to an extractive candidate that IS stated by a listed passage
@@ -343,7 +374,7 @@ class ScriptedAgent(BaseAgent):
         if self.task_type == "extractive" and passages:
             proposal = self._propose_answer(question, passages, rng)
             np_ = normalize_text(proposal)
-            hits = [i for i, t in passages if np_ and np_ in normalize_text(t)]
+            hits = [i for i, t in passages if contains_phrase(np_, normalize_text(t))]
             if hits and rng.random() < 0.5:
                 return "Verification: passage {{E{}}} states the answer. Therefore, the final answer is [{}]. {{E{}}}".format(hits[0], proposal, hits[0])
         return "Verification: none of the listed passages states the agents' answer. [Unsupported] {E-none}"
