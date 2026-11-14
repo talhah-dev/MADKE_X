@@ -1,4 +1,4 @@
-# MADKE-X: Traceable, Evidence-Governed Multi-Agent Debate for Knowledge-Intensive QA
+# MADKE-X: A Traceable and Failure-Aware Multi-Agent Debate Framework for Knowledge-Intensive QA
 
 This repository extends **MADKE** (_Learning to Break:_ Knowledge-Enhanced Reasoning in Multi-Agent Debate System,
 Neurocomputing 2025, [[Paper](https://www.sciencedirect.com/science/article/pii/S0925231224018344)]) with the

@@ -1,0 +1,30 @@
+\section{Complexity analysis}
+\label{sec:complexity}
+
+This section compares the cost of MADKE and MADKE-X analytically and relates each term to the measurements of Section~\ref{sec:offline}. Let $A$ be the number of agents, $R$ the maximum number of rounds, $m$ the pool size, $L$ the mean passage length in tokens, $|q|$ the number of question tokens, $N_B$ the number of passages in the reference set and $V_B$ the size of its vocabulary. Table~\ref{tab:complexity} summarises the comparison.
+
+\paragraph{Model calls} Both systems make at most $R(2A+1)+1$ calls per question (Eq.~\eqref{eq:calls}), which is 16 in the published setting. MADKE-X adds at most one verification call (Eq.~\eqref{eq:callbound}), so its worst case is 17 calls, an increase of 6.25\%. A model call takes seconds, and every other operation in either pipeline takes less than a millisecond per question, so the number of calls dominates the running time of both systems. MADKE-X does not necessarily make more calls than MADKE. A debate that ends in the round of agreement saves $2A+1=5$ calls for each round that is not run. Under scripted agents the release averaged \VCallsRel{} calls per question and MADKE-X \VCallsX{} (Section~\ref{sec:r_cost}). These averages depend on how the scripted judge words its verdicts and predict nothing about a real model.
+
+\paragraph{Input tokens} A selection call lists the whole pool. With the default of the release the listing holds up to 15 passages, with the specified pool at most 10. A Wikipedia passage is about four times as long as a Google snippet, so dropping five Wikipedia passages removes \VTokRedMean\% of the listing tokens, more than the one third of the passages would suggest. A question has at most $AR=6$ selection calls, so the saving is up to \VTokSavedSixMax{} input tokens per question. The answer and judge prompts do not depend on the pool size. The summariser prompt of MADKE-X is longer than that of MADKE by the listing of the passages in $U_q$, with $|U_q|\le \min(m, kAR)$.
+
+\paragraph{Pool construction} MADKE slices two lists, which costs $O(1)$. MADKE-X normalises every candidate passage for de-duplication, which costs $O(mL)$. It then tokenises the candidates and scores them against the question with the stored statistics, which costs $O(mL + m|q|)$, and sorts them, which costs $O(m\log m)$. The reference statistics are built once per benchmark file in $O(N_B L)$ time. On the shipped data this takes \VIndexMsMin{} to \VIndexMsMax\,ms per file, and a pool takes \VBuildXMin{} to \VBuildXMax\,ms per question (Table~\ref{tab:pool}).
+
+\paragraph{Memory and trace} The additional data structures are the document frequencies of the reference set, of size $O(V_B)$, and the trace. The trace of a question stores at most $kAR$ delivered identifiers, the dropped, ignored and out-of-range identifiers, $R$ verdicts, the citations and the $m$ manifest entries, that is, $O(kAR + m)$ items. Holding the pools of all 500 questions of a dataset with their manifests takes \VMemXMin{} to \VMemXMax\,MB.
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Analytic cost of MADKE and MADKE-X per question.}
+\label{tab:complexity}
+\begin{tabular}{p{0.25\textwidth}p{0.29\textwidth}p{0.36\textwidth}}
+\toprule
+Quantity & MADKE & MADKE-X \\
+\midrule
+Model calls (worst case) & $R(2A{+}1){+}1$ (16 at $A{=}2$, $R{=}3$) & $R(2A{+}1){+}2$ (17, $+6.25\%$) \\
+Evidence listing per selection call & $(10{+}5)$ passages & at most $(5{+}5)$ passages ($-$\VTokRedMean\% tokens) \\
+Pool construction & $O(1)$ slice & $O(mL + m|q| + m\log m)$ \\
+Reference statistics (once per file) & none & $O(N_B L)$ time, $O(V_B)$ memory \\
+Trace & none & $O(kAR + m)$ items \\
+\bottomrule
+\end{tabular}
+\end{table}

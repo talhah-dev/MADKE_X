@@ -1,0 +1,102 @@
+\section{Results demonstrated offline}
+\label{sec:offline}
+
+This section answers RQ1 to RQ3. Section~\ref{sec:r_order} and Section~\ref{sec:r_cost} measure the data and the code directly and involve no agent. The other subsections use the scripted agents of Section~\ref{sec:design}; what they report is the behaviour of the two pipelines, and not the quality of a model.
+
+\subsection{Data integrity and invariants}
+The five shipped files were opened read-only throughout. Their SHA-256 digests were recorded before the first experiment, matched at the start of every run and matched again after the last one. The manifest of every MADKE-X record stores the digest of every passage in the pool, and rebuilding the pools from the raw files reproduced every manifest.
+
+Table~\ref{tab:invariants} lists the invariants that were checked on the MADKE-X records. All \VInvChecksAll{} checks passed, \VInvChecks{} on each dataset. The scripted agents also produce answers, which exercises the scoring code. The exact-match values that result, for example \VScriptEmRelTQA\% for MADKE and \VScriptEmXTQA\% for MADKE-X on TriviaQA, say nothing about accuracy with a language model. The paired differences are not significant on any dataset ($p\ge\VScriptPMin$), and they are not interpreted.
+
+\input{generated/tab_invariants}
+
+\subsection{Interface behaviour (RQ1)}
+\label{sec:r_interface}
+Table~\ref{tab:formats} shows the parsers of the release and of MADKE-X on fixed replies. The outcome is deterministic, so this table holds for any model that writes these formats.
+
+\input{generated/tab_formats}
+
+The selection replies of part~(a) fall into three groups. The first group consists of replies in which every bracket holds one number. Both parsers deliver the same passages for them, the release in reverse order. A reply that discusses two passages before it selects three belongs to this group: both parsers keep the three that come last, and MADKE-X records the other two as dropped. So does a reply that lists five passages although three were asked for. Both parsers keep the last three. Which three ought to be kept in that case is a matter of convention, and the record of the dropped identifiers at least makes the event visible. The second group is the list in one bracket, which the release cannot read. The third is the not-found marker in lower case: the release does not recognise it and delivers a passage that the agent mentioned only to say that it does not fit. In part~(b) the release reads agreement from the plain form alone, and it reads agreement into a reply that repeats an agent answer \texttt{[Yes]} before the verdict \texttt{[No]}.
+
+Table~\ref{tab:interface} and Figure~\ref{fig:interface}a give the corresponding rates under scripted agents. The summariser prompt of the release holds the question in the question slot for \VBindRel{} of \VNQuestions{} questions, that of MADKE-X for all of them. The release delivers the selected passages for \VSetPctRel\% of its \VSelRel{} selection replies. The other \VSetBadRel{} replies are lists in one bracket, and the debaters that wrote them answered that round without evidence. The written order is kept only for the \VOrderOkRel{} replies that name a single passage. This is the least important of the differences, because it changes nothing but the sequence in which a debater reads its passages. MADKE-X delivers the selected passages in the written order for all \VSelX{} replies of its runs. The two systems make different numbers of selections because MADKE-X ends its debates earlier.
+
+Of the debates of the release, \VStopPctRel\% end in the round in which the judge first states agreement. The other \VStopLateRel{} run on, because \VMissedRel{} of the \VJudgeYesRel{} judge replies that state agreement (\VMissedPctRel\%) are written with quotes, in lower case or with a full stop. All debates of MADKE-X end in the round of agreement. The opposite error needs an agent whose answer is the word ``Yes''. It did not occur in the re-run of the release. In the runs of MADKE-X, \VFalseAgreeX{} judge replies repeat such an answer next to a negative verdict, and the test of the release would have taken each of them for agreement.
+
+\input{generated/tab_interface}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\textwidth]{fig_interface}
+\caption{Interface behaviour under scripted agents. (a) Share of cases in which each property holds, pooled over the five datasets; the numbers are the values of MADKE. (b) Consistency ratio of the same debates: as stated in the judge replies, as counted by the evaluation formula of the release, and as computed by MADKE-X.}
+\label{fig:interface}
+\end{figure}
+
+\subsection{Debate statistics (RQ1)}
+Table~\ref{tab:consistency} and Figure~\ref{fig:interface}b separate two losses in the consistency ratio of the release. The reference value is the share of debates in which a judge reply states agreement. Over the five datasets it is \VConsTrueRel\% in the re-run of the release. The verdicts that the release recognised give \VConsPipeRel\%: the difference is the agreement that the literal test missed (finding C4). The evaluation formula of the release then reports \VConsFormRel\%, because it cannot count an agreement of the last round (finding C5). On the single datasets the formula reports \VConsGapMin{} to \VConsGapMax{} points less than the judge replies state.
+
+For MADKE-X the first two columns agree on every dataset, as invariant D2 requires, and the formula of the release would lose only \VConsGapXMin{} to \VConsGapXMax{} points, since few debates of MADKE-X reach the last round at all. Co2 shows the same pattern at a lower level. The level itself carries no meaning here, because the answers come from scripts. Nor do the differences between the two systems in the first column: the two systems hold different debates over different pools.
+
+\input{generated/tab_consistency}
+
+\subsection{Failure handling (RQ1)}
+\label{sec:r_failure}
+Table~\ref{tab:failure} reports the fault-injection experiment on the first \VFailN{} questions of every dataset, in which each scripted call fails with a probability of \VFailRate\%. The release marks no question as failed. It scores \VFailScoredRel{} of the \VFailNAll{} questions although at least one of their calls failed, \VFailScoredRelMin{} to \VFailScoredRelMax{} per dataset; in these debates an error message took the place of a selection, an answer, a verdict or the summary. MADKE-X stops a question at its first failed call and marks it as failed. This happened for \VFailFlaggedX{} questions, \VFailFlaggedXMin{} to \VFailFlaggedXMax{} per dataset, and the scores were computed from the questions that remained. The release meets more failures than MADKE-X because it makes more calls per question and keeps calling after a failure. With a failure rate of zero both systems complete every question.
+
+\input{generated/tab_failure}
+
+\subsection{Evidence ordering (RQ2)}
+\label{sec:r_order}
+Table~\ref{tab:ordering} and Figure~\ref{fig:ordering} report how early an answer-bearing passage appears under each ordering, and Table~\ref{tab:paired} gives the paired test of the RRF order against the order of the release. FEVER and the questions with a yes or no answer are not included, for the reason given in Section~\ref{sec:design}.
+
+The release lists all Wikipedia passages before any Google passage, whatever the question. On TriviaQA, HotpotQA and 2WikiMultihopQA this order is worse than a random order of the pool at $k=3$: an answer-bearing passage is among the first three for \VCovThreeOrigTQA\%, \VCovThreeOrigHQA\% and \VCovThreeOrigWMQ\% of the questions, against random expectations of \VCovThreeRandTQA\%, \VCovThreeRandHQA\% and \VCovThreeRandWMQ\%. The cause is the position of the Google snippets. They are short, they often contain the answer string, and they come last. The interleaved order does nothing but alternate the two sources, and it already lifts cov@3 to \VCovThreeInterTQA\%, \VCovThreeInterHQA\% and \VCovThreeInterWMQ\% on these datasets. NQ is the exception: its Wikipedia order beats the random expectation (\VCovThreeOrigNQ\% against \VCovThreeRandNQ\%), so the dense retriever serves this dataset well.
+
+\input{generated/tab_ordering}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.88\textwidth]{fig_ordering}
+\caption{Questions with an answer-bearing passage among the first three passages of the listing, under the order of the release and under the RRF order of MADKE-X. The vertical mark is the expectation under a random order of the MADKE-X pool; the number is the gain in percentage points.}
+\label{fig:ordering}
+\end{figure}
+
+BM25 alone and RRF are both better than the order of the release at $k=3$ on all four datasets, and RRF is above the random expectation on all four. RRF reaches a cov@3 of \VCovThreeRrfTQA\%, \VCovThreeRrfNQ\%, \VCovThreeRrfHQA\% and \VCovThreeRrfWMQ\%, which are gains of \VGainTQA, \VGainNQ, \VGainHQA{} and \VGainWMQ{} points. All four gains are significant under the exact McNemar test, also after Holm correction (largest adjusted $p=\VHolmMax$; Table~\ref{tab:paired}). The mean reciprocal rank moves the same way, for instance from \VMrrOrigTQA{} to \VMrrRrfTQA{} on TriviaQA and from \VMrrOrigHQA{} to \VMrrRrfHQA{} on HotpotQA.
+
+\input{generated/tab_paired}
+
+RRF is not the best ordering in every cell of Table~\ref{tab:ordering}. On NQ the interleaved order is ahead at $k=3$ and $k=5$, and BM25 alone is slightly ahead in a few cells on TriviaQA and 2WikiMultihopQA. What distinguishes RRF is that it is never far behind. Over the twelve coverage cells of the table it trails the best ordering by at most \VWorstGapRrf{} points, whereas BM25 alone trails by up to \VWorstGapBm{} points, the interleaved order by up to \VWorstGapInter{} and the order of the release by up to \VWorstGapOrig. The weak cell of BM25 is the first position on NQ. The Wikipedia order has an answer-bearing passage there for \VCovOneOrigNQ\% of the questions, BM25 alone for \VCovOneBmNQ\% and RRF for \VCovOneRrfNQ\%. Fusing the source rank with the lexical rank guards against the questions whose terms are a poor guide and keeps the gains where the original order is uninformative.
+
+\subsection{Pool size, coverage and cost (RQ2, RQ3)}
+\label{sec:r_cost}
+The gains in ordering are not free in coverage. Table~\ref{tab:pool} and Figure~\ref{fig:cost}b show that the step from the default pool of the release to the specified pool lowers the share of questions with any answer-bearing passage by \VCoverLossTQA{} points on TriviaQA, \VCoverLossNQ{} on NQ, \VCoverLossHQA{} on HotpotQA and \VCoverLossWMQ{} on 2WikiMultihopQA. The questions that are lost have their only answer-bearing passage among the Wikipedia passages ranked sixth to tenth. De-duplication removes \VDupMin{} to \VDupMax{} passages per dataset, \VDupTotal{} in all, and does not change coverage.
+
+\input{generated/tab_pool}
+
+On the cost side (Table~\ref{tab:pool}, Figure~\ref{fig:cost}a), the specified pool shortens the evidence listing of a selection call from about 1,700 tokens to between \VTokXTQA{} and \VTokXWMQ{} tokens, a reduction of \VTokRedMin{} to \VTokRedMax\%. Nearly all of it comes from the size of the pool; de-duplication alone shortens the listing by at most \VTokRedSpecMax\%. The saving is relative to the default of the release. A user who already runs MADKE with five Wikipedia passages gains almost nothing in tokens from MADKE-X.
+
+Building a pool takes \VBuildXMin{} to \VBuildXMax\,ms per question, against about a microsecond for slicing two lists, and the reference statistics of a file are built in \VIndexMsMin{} to \VIndexMsMax\,ms. The pools of the 500 questions of a dataset occupy \VMemXMin{} to \VMemXMax\,MB with their manifests; the sliced lists of the release only reference the loaded data and occupy \VMemRelMax\,MB. Next to a model call that takes seconds, these costs do not matter.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\textwidth]{fig_cost}
+\caption{The benefit and the price of the specified pool. (a) Tokens of the evidence listing of one selection call, with the reduction in percent. (b) Share of questions for which the pool contains an answer-bearing passage, with the loss in percentage points.}
+\label{fig:cost}
+\end{figure}
+
+The debates of the two systems also differ in length. Under scripted agents the release needed \VRoundsRel{} rounds and \VCallsRel{} model calls per question on average, MADKE-X \VRoundsX{} rounds and \VCallsX{} calls, and the input of a question, counted over the system and user messages of all its calls, fell from \VInTokRel{} to \VInTokX{} tokens (\VInTokRed\% less). Two causes act together, the shorter listing and the earlier stop. Their shares depend on how the scripted judge words its verdicts, so the corresponding figure for a language model has to come from the live runs.
+
+\subsection{Trace, citations and verification (RQ3)}
+Over the \VNQuestions{} scripted debates of MADKE-X, the identifiers stored in the trace satisfied the bounds and the cap in every selection (invariant I3), all \VCiteParsed{} citations pointed to a passage of the pool that an agent had selected, and the stored support status was reproduced from the trace for every record (invariant I5). For FEVER, and for the \VVerdictAnswers{} questions of the other datasets that were answered with ``yes'' or ``no'', the status is \emph{not applicable}. When the scripted summariser cites the passages that contain its answer, at least \VSupXMin\% of the applicable answers are supported at the end on each dataset. The verification step was triggered \VVerCalls{} times in these runs; \VVerAdopt{} second answers were adopted, and the scripted verifier abstained \VVerAbst{} times.
+
+A summariser that cites well leaves the verification step little to do, so a stress test was run with a careless one (Table~\ref{tab:stress}, Figure~\ref{fig:verification}). This scripted summariser always cites the first listed passage. Its first answer is supported for only \VStressBeforeMin{} to \VStressBeforeMax\% of the questions, and the verification step is called \VStressCalls{} times. In \VStressSame{} of these calls the second reply keeps the answer and cites a passage that contains it. In \VStressNew{} calls it gives a different answer that a listed passage supports, and in \VStressAbst{} it abstains, in which case the first answer stays. No second reply was itself unsupported, and no answer that was supported at first was touched. The support rate ends at \VStressAfterMin\% or higher on every dataset. These counts come from scripts. They show that the step behaves as Eq.~\eqref{eq:verify} specifies and say nothing about how often a real model will be helped.
+
+\input{generated/tab_stress}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.88\textwidth]{fig_verification}
+\caption{Stress test of the bounded verification step with a scripted summariser that always cites the first listed passage: share of answers supported by a cited passage before and after the step. The numbers are the values before the step.}
+\label{fig:verification}
+\end{figure}
+
+\subsection{Summary of the offline results}
+RQ1 is answered positively. Under identical scripted agents MADKE-X meets every invariant, gives the summariser a correct prompt, delivers the selected passages in every case and ends every debate in the round of agreement, and its debate statistics equal the direct count. The release fails each of these properties for a measurable share of the cases, and it scores questions whose calls failed. RQ2 is answered positively with a qualification. The RRF order lists answer-bearing passages earlier on all four question-answering datasets, with paired significance, and the smaller pool that the MADKE paper specifies costs up to \VCoverLossMax{} points of coverage. RQ3 is answered positively: the evidence listing shrinks by \VTokRedMean\% relative to the default of the release, the added time and memory are negligible, and the trace reproduces what the pipeline did. None of these results says anything about accuracy, which is the subject of the next section.

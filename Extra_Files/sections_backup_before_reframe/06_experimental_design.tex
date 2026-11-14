@@ -1,0 +1,88 @@
+\section{Experimental design}
+\label{sec:design}
+
+The design repeats the evaluation of MADKE wherever the shipped material allows it, so that MADKE and MADKE-X are compared like for like, and it adds the statistical procedures that the original evaluation lacks. Four research questions organise it.
+
+\begin{description}
+\item[RQ1 (correctness)] Does MADKE-X execute the debate as specified where the release does not?
+\item[RQ2 (evidence)] Does the evidence governor list answer-bearing passages earlier, and what does the smaller pool cost in coverage?
+\item[RQ3 (cost and traceability)] How do the two systems compare in input size, time and memory, and does the trace of MADKE-X record what the pipeline did?
+\item[RQ4 (accuracy)] Does MADKE-X change the accuracy and the debate statistics when both systems answer the same questions with the same backbone model?
+\end{description}
+
+RQ1 to RQ3 concern properties of the data and of the pipelines that do not depend on the quality of a model. They are answered offline (Section~\ref{sec:offline}). RQ4 needs a live model and is addressed in Section~\ref{sec:live}. Table~\ref{tab:design} sets the design of this study beside that of MADKE.
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Evaluation design of MADKE and of this study.}
+\label{tab:design}
+\begin{tabular}{p{0.13\textwidth}p{0.35\textwidth}p{0.42\textwidth}}
+\toprule
+ & MADKE (published) & This study \\
+\midrule
+Datasets & TriviaQA, NQ, HotpotQA, 2WikiMQA and FEVER with 500 questions each; a medical set with 595 & The five shipped files, unaltered, with all 500 questions each; the medical set is not shipped \\
+Compared systems & SP, CoT, SC, RAG, MAD and MADKE & MADKE, re-run from the logic of the release in the harness of MADKE-X, and MADKE-X; published baselines shown for reference \\
+Backbones & GPT-3.5-Turbo, Qwen1.5-32B-Chat, Qwen1.5-72B-Chat; GPT-4-Turbo as reference & Open-weight Qwen models served on free hardware (Section~\ref{sec:live}) \\
+Metrics & F1, GPT-4 score, EM for FEVER, Cons, Co2 & EM and F1 on the completed set (Eq.~\ref{eq:emf1}), Cons and Co2 with exact match (Eq.~\ref{eq:cons}), support rate (Eq.~\ref{eq:sr}), failed questions, tokens \\
+Setting & Two agents, at most 3 rounds, temperature 0.5, 5 Wikipedia and 5 Google passages, at most 3 passages per selection & The same; the re-run of the release uses its default pool of 10 and 5 passages \\
+Analyses & Knowledge sources, number of agents and rounds, case study & Evidence ordering, cost, invariants, fault injection, verification stress test \\
+Statistics & Point estimates & Paired exact McNemar test, bootstrap intervals, Holm correction, power analysis \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Datasets and pools}
+The five shipped JSON files are used exactly as distributed. Their SHA-256 digests are verified before every run, with line endings normalised so that the check gives the same result on Windows and Linux. Each file has 500 questions. FEVER takes part in every measurement on the pipeline (invariants, cost, trace) and in the accuracy comparison, where it is scored by exact match on the verdict label. Measures that test whether a gold answer string occurs in a passage, namely coverage, ordering and the support check, are computed on the questions with a span answer: all 500 questions of TriviaQA and NQ, \VNSpanHQA{} of HotpotQA and \VNSpanWMQ{} of 2WikiMultihopQA.
+
+\subsection{Systems compared}
+\emph{MADKE} denotes the behaviour of the release. It is reproduced inside the harness of MADKE-X by a switch that restores the findings of Table~\ref{tab:defects}: the pool of ten and five passages without de-duplication or reordering, the original selection parser, the literal verdict test, the swapped summariser arguments and error texts that are carried into the debate. Running both systems from one harness keeps the prompts, the sampling parameters, the checkpointing and the scoring identical. The re-run differs from the release in one respect: all 500 questions are processed and not 441 (finding C2), so that both systems answer the same questions. \emph{MADKE-X} denotes the full method of Section~\ref{sec:method}, with citations and verification enabled. Its components can be switched on and off one at a time, which permits an ablation in the live setting.
+
+\subsection{Measures}
+\emph{Invariants.} For RQ1, every MADKE-X record is checked against eight invariants that follow from the method description, and every dataset against three more (Table~\ref{tab:invariants}). The interface properties of both systems are measured as rates: how often the question slot of the summariser prompt holds the question, how often the passages delivered to an agent are the passages its reply selects, and how often a debate ends in the first round whose judge reply states agreement.
+
+\emph{Ordering.} For RQ2, let $h_q$ be the 1-based position of the first passage in a listing whose normalised text contains a normalised gold answer of $q$ as whole words. Coverage at $k$ and the mean reciprocal rank are
+\begin{equation}
+\mathrm{cov@}k = \frac{1}{|Q|}\sum_{q\in Q}\mathbb{1}\big[h_q\le k\big],
+\qquad
+\mathrm{MRR} = \frac{1}{|Q|}\sum_{q\in Q}\frac{\mathbb{1}[h_q \text{ exists}]}{h_q},
+\label{eq:cov}
+\end{equation}
+reported for $k\in\{1,3,5\}$. Five orderings are compared: the order of the release (ten Wikipedia passages, then five Google passages), an interleaved order that alternates the two sources by rank, BM25 alone, RRF, and a random order. For the random order the exact expectation is used. If a pool has $n$ passages of which $a$ are answer-bearing, a uniformly random order gives
+\begin{equation}
+\Pr[h\le k] = 1-\binom{n-a}{k}\Big/\binom{n}{k},
+\qquad
+\mathbb{E}\big[1/h\big] = \sum_{j=1}^{n-a+1}\frac{1}{j}\,\binom{n-j}{a-1}\Big/\binom{n}{a},
+\label{eq:random}
+\end{equation}
+and the two terms are averaged over the questions. The random order is a useful yardstick: an ordering that falls below it places answer-bearing passages later than chance would.
+
+\emph{Cost.} For RQ3, the evidence listing of a selection call and the input of a whole question are measured in tokens of the cl100k\_base tokenizer. Pool construction is timed in milliseconds per question (best of three passes), and memory is the allocation peak while the pools of all 500 questions are held.
+
+\emph{Accuracy and debate.} For RQ4, EM and F1 follow Eq.~\eqref{eq:emf1}, Cons and Co2 follow Eq.~\eqref{eq:cons} and the support rate follows Eq.~\eqref{eq:sr}. The GPT-4 correctness score of the original evaluation is not used. It needs a paid model, and its agreement with human judgement would itself have to be validated \cite{zheng2023judge}.
+
+\subsection{Statistical analysis}
+Both systems are evaluated on the same questions, so all comparisons are paired. For a binary outcome such as exact match or cov@3, the exact McNemar test compares the number $b$ of questions that are correct only under the first system with the number $c$ that are correct only under the second:
+\begin{equation}
+p = \min\Big(1,\; 2\sum_{i=0}^{\min(b,c)}\binom{b+c}{i}\,2^{-(b+c)}\Big).
+\label{eq:mcnemar}
+\end{equation}
+Confidence intervals are percentile intervals from 1,000 bootstrap resamples of the questions with a fixed seed. When one hypothesis is tested on several datasets, the Holm procedure controls the family-wise error rate.
+
+The number of questions limits which differences can be detected at all. For two methods with accuracies $p_1$ and $p_2$ that are evaluated on separate samples, a two-sided test at level $\alpha$ reaches power $1-\beta$ with
+\begin{equation}
+n = \frac{\Big(z_{1-\alpha/2}\sqrt{2\bar p(1-\bar p)} + z_{1-\beta}\sqrt{p_1(1-p_1)+p_2(1-p_2)}\Big)^2}{(p_1-p_2)^2},
+\qquad \bar p = \frac{p_1+p_2}{2},
+\label{eq:power}
+\end{equation}
+questions per method, where $z_x$ is the $x$-quantile of the standard normal distribution \cite{cohen1988power}. With $n=500$, $\alpha=0.05$ and 80\% power, the smallest detectable difference near 50\% accuracy is \VPowHalfMargin{} points. A paired test needs fewer questions when the two systems agree on most of them. If a share $d$ of the questions is answered correctly by exactly one system and the accuracy difference is $\delta$, McNemar's test needs about $\big(z_{1-\alpha/2}\sqrt{d}+z_{1-\beta}\sqrt{d-\delta^2}\big)^2/\delta^2$ paired questions, for example \VPairedNeed{} for $\delta=0.044$ and $d=0.25$. Differences on a single dataset are therefore treated as exploratory in the live comparison, and the paired test pooled over the five datasets is the primary test for RQ4.
+
+\subsection{Scripted agents}
+The offline experiments replace the language model by deterministic scripted agents. A scripted agent plays every role of the debate with lexical rules, and each of its replies is a function of the prompt and a fixed seed. The release and MADKE-X thus receive the same reply to the same prompt, and a difference in their behaviour is caused by the code.
+
+The replies vary in format in a controlled way. A selection reply names the up to three passages that share most words with the question, in one of five formats: separate brackets (55\% of the replies), the same with the first passage also named in a preceding sentence (15\%), two further passages discussed before the selection (12\%), an identifier outside the pool appended (10\%), and one bracket with a comma-separated list (8\%). If no passage shares a content word with the question, the reply mentions the first passage as unrelated and ends with the not-found marker in one of four spellings. The scripted agent also reports the selection it means to make, which gives the two parsers a reference to be measured against. A scripted debater proposes a capitalised phrase or a number from the passages it was handed, takes its second-best candidate in 30\% of the cases so that the agents sometimes disagree, and takes over the answer of the other agent when that answer occurs in its own passages. For FEVER it derives a label from the word overlap between the claim and the passages. The scripted judge repeats the answers and states agreement exactly when they are equal after normalisation; it writes the verdict as \texttt{[Yes]} or \texttt{[No]} (60\%), in quotes (15\%), in lower case (15\%) or with a full stop inside the bracket (10\%). The scripted summariser returns the majority answer and cites up to two listed passages that contain it. When no listed passage contains the answer, it cites the first listed passage in half of the cases and writes $\{E\text{-none}\}$ in the other half. The scripted verifier confirms an answer of the debate that a listed passage contains and cites that passage; otherwise it abstains or proposes a candidate from the listed passages.
+
+Scripted agents test formats and control flow. They do not reason, and their answers measure neither system. The format shares above are set by the scripts, so the rates reported for them in Section~\ref{sec:offline} state how each parser copes with these formats and are not estimates of how often a language model writes them. The same counters are computed from the records of a live run, where they describe the model that was used.
+
+\subsection{Environment}
+The debate loop, the parsers, the governor and the statistics use only the Python standard library. Tokens are counted with the tiktoken library and figures are drawn with Matplotlib. The offline experiments ran with Python~\VPython{} under Windows~11 on a laptop with an Intel Core i5-8350U processor (four cores, 1.70\,GHz) and 16\,GB of memory, without a GPU, a language model or a search API. The complete offline run over the \VNQuestions{} questions, for both systems and including the fault-injection and stress experiments, takes about \VElapsed\,s. The results reported here were produced by version \VCodeVersion{} of the code. Every record stores the version that wrote it, and a run does not resume checkpoints of another version. The live experiments use the hardware described in Section~\ref{sec:live}.

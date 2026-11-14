@@ -139,3 +139,20 @@ output tokens**.
 
 Before paying anything: check the current price on the provider's own page, and make sure the
 model name you buy is exactly the one written in the paper.
+
+---
+
+## Added: single best guesses for Qwen 32B (NOT real, middle of each range)
+
+| Dataset | Old paper, MADKE (real, published) | MADKE-X best guess (NOT real) | Expected range |
+|---|---|---|---|
+| TriviaQA (F1) | 76.3% | ~74.5% | 70–79% |
+| NQ (F1) | 47.5% | ~46% | 42–50% |
+| HotpotQA (F1) | 45.0% | ~44% | 40–48% |
+| 2WikiMultihopQA (F1) | 25.8% | ~25.5% | 22–29% |
+| FEVER (EM) | 64.6% | ~64% | 60–68% |
+
+Higher is better. The guesses are slightly lower than the old paper only because of the setup,
+not the method: the old paper used the full model on strong paid servers, while this run uses a
+compressed (4-bit) model on free Kaggle GPUs, which usually costs 1–3 points.
+The fair comparison in the paper is MADKE vs MADKE-X on the SAME model and hardware (Table 15).
